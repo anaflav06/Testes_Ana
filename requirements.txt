@@ -8,3 +8,4 @@ PyPDF2
 PyMuPDF
 XlsxWriter
 requests
+reportlab
