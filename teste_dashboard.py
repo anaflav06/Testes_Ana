@@ -60,6 +60,7 @@ DATABASE_MOTORISTAS_JSON = "database_motoristas.json"
 DATABASE_PLACAS_JSON = "database_placas.json"
 DATABASE_CEPS_JSON = "database_ceps.json"
 DATABASE_USUARIOS_JSON = "usuarios.json"
+DATABASE_HISTORICO_FECHAMENTOS_JSON = "historico_fechamentos.json"
 
 
 def github_json_ativo() -> bool:
@@ -436,6 +437,273 @@ def renderizar_controle_acesso_sidebar() -> None:
             [{"Usuário": nome, "Perfil": info.get("perfil", "operador")} for nome, info in usuarios.items()]
         ).sort_values("Usuário")
         st.dataframe(df_usuarios, use_container_width=True, hide_index=True, height=180)
+
+
+
+# =========================================================
+# HISTÓRICO DE FECHAMENTOS / AUDITORIA
+# =========================================================
+ARQUIVO_HISTORICO_FECHAMENTOS = Path("historico_fechamentos.json")
+
+
+def _normalizar_historico_fechamentos(dados) -> List[Dict[str, object]]:
+    if isinstance(dados, dict):
+        dados = dados.get("fechamentos", [])
+    if not isinstance(dados, list):
+        return []
+
+    historico = []
+    for item in dados:
+        if not isinstance(item, dict):
+            continue
+        historico.append({
+            "ID": str(item.get("ID", "") or "").strip(),
+            "Data/hora": str(item.get("Data/hora", "") or "").strip(),
+            "Usuário": str(item.get("Usuário", "") or "Usuário não identificado").strip(),
+            "Perfil": str(item.get("Perfil", "") or "").strip(),
+            "Tipo de documento": str(item.get("Tipo de documento", "") or "").strip(),
+            "Motorista": str(item.get("Motorista", "") or "").strip(),
+            "CNPJ": str(item.get("CNPJ", "") or "SEM CNPJ").strip(),
+            "Quinzena": str(item.get("Quinzena", "") or "").strip(),
+            "Período inicial": str(item.get("Período inicial", "") or "").strip(),
+            "Período final": str(item.get("Período final", "") or "").strip(),
+            "Total de entregas": int(float(item.get("Total de entregas", 0) or 0)),
+            "Kg excedente": float(item.get("Kg excedente", 0) or 0),
+            "Subtotal": float(item.get("Subtotal", 0) or 0),
+            "Acareação": float(item.get("Acareação", 0) or 0),
+            "Bônus Extra": float(item.get("Bônus Extra", 0) or 0),
+            "Bônus Sábados": float(item.get("Bônus Sábados", 0) or 0),
+            "Bônus Feriado": float(item.get("Bônus Feriado", 0) or 0),
+            "Vale": float(item.get("Vale", 0) or 0),
+            "Desconto": float(item.get("Desconto", 0) or 0),
+            "Total pago": float(item.get("Total pago", 0) or 0),
+        })
+    return historico
+
+
+def carregar_historico_fechamentos() -> List[Dict[str, object]]:
+    dados = None
+
+    if github_json_ativo():
+        dados = carregar_json_github(DATABASE_HISTORICO_FECHAMENTOS_JSON, "[]")
+
+    if not dados and ARQUIVO_HISTORICO_FECHAMENTOS.exists():
+        try:
+            dados = json.loads(ARQUIVO_HISTORICO_FECHAMENTOS.read_text(encoding="utf-8"))
+        except Exception:
+            dados = []
+
+    historico = _normalizar_historico_fechamentos(dados)
+    if not ARQUIVO_HISTORICO_FECHAMENTOS.exists():
+        salvar_historico_fechamentos(historico)
+    return historico
+
+
+def salvar_historico_fechamentos(historico: List[Dict[str, object]]) -> bool:
+    historico = _normalizar_historico_fechamentos(historico)
+    salvou_local = False
+
+    try:
+        ARQUIVO_HISTORICO_FECHAMENTOS.write_text(
+            json.dumps(historico, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        salvou_local = True
+    except Exception:
+        salvou_local = False
+
+    salvou_github = salvar_json_github(
+        DATABASE_HISTORICO_FECHAMENTOS_JSON,
+        historico,
+        "Atualiza historico_fechamentos.json",
+    ) if github_json_ativo() else False
+
+    return salvou_local or salvou_github
+
+
+def registrar_historico_fechamento(registro: Dict[str, object]) -> None:
+    historico = carregar_historico_fechamentos()
+    registro = dict(registro or {})
+    registro["ID"] = registro.get("ID") or agora_brasil().strftime("%Y%m%d%H%M%S%f")
+    registro["Data/hora"] = registro.get("Data/hora") or agora_brasil().strftime("%d/%m/%Y %H:%M")
+    registro["Usuário"] = registro.get("Usuário") or usuario_logado() or "Usuário não identificado"
+    registro["Perfil"] = registro.get("Perfil") or perfil_logado()
+
+    historico.append(registro)
+    salvar_historico_fechamentos(historico)
+
+
+def montar_registro_fechamento(
+    tipo_documento: str,
+    motorista: str,
+    cnpj_motorista: str,
+    quinzena: str,
+    data_inicio,
+    data_fim,
+    qtd_entregas: int,
+    kg_excedente: float,
+    subtotal: float,
+    acareacao: float,
+    bonus_extra: float,
+    bonus_sabados: float,
+    bonus_feriado: float,
+    vale: float,
+    desconto: float,
+    total_pago: float,
+    finalizado_por: str = "",
+    finalizado_em: str = "",
+) -> Dict[str, object]:
+    return {
+        "Data/hora": finalizado_em or agora_brasil().strftime("%d/%m/%Y %H:%M"),
+        "Usuário": finalizado_por or usuario_logado() or "Usuário não identificado",
+        "Perfil": perfil_logado(),
+        "Tipo de documento": tipo_documento,
+        "Motorista": str(motorista or "").strip(),
+        "CNPJ": str(cnpj_motorista or "SEM CNPJ").strip(),
+        "Quinzena": str(quinzena or "").strip(),
+        "Período inicial": pd.to_datetime(data_inicio, errors="coerce").strftime("%d/%m/%Y") if pd.notna(pd.to_datetime(data_inicio, errors="coerce")) else str(data_inicio or ""),
+        "Período final": pd.to_datetime(data_fim, errors="coerce").strftime("%d/%m/%Y") if pd.notna(pd.to_datetime(data_fim, errors="coerce")) else str(data_fim or ""),
+        "Total de entregas": int(qtd_entregas or 0),
+        "Kg excedente": float(kg_excedente or 0),
+        "Subtotal": float(subtotal or 0),
+        "Acareação": float(acareacao or 0),
+        "Bônus Extra": float(bonus_extra or 0),
+        "Bônus Sábados": float(bonus_sabados or 0),
+        "Bônus Feriado": float(bonus_feriado or 0),
+        "Vale": float(vale or 0),
+        "Desconto": float(desconto or 0),
+        "Total pago": float(total_pago or 0),
+    }
+
+
+def historico_fechamentos_df() -> pd.DataFrame:
+    historico = carregar_historico_fechamentos()
+    colunas = [
+        "Data/hora", "Usuário", "Perfil", "Tipo de documento", "Motorista", "CNPJ", "Quinzena",
+        "Período inicial", "Período final", "Total de entregas", "Kg excedente", "Subtotal",
+        "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago",
+    ]
+    df = pd.DataFrame(historico)
+    for col in colunas:
+        if col not in df.columns:
+            df[col] = "" if col not in ["Total de entregas", "Kg excedente", "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"] else 0
+    df = df[colunas].copy()
+    if not df.empty:
+        df["_ordem"] = pd.to_datetime(df["Data/hora"], dayfirst=True, errors="coerce")
+        df = df.sort_values("_ordem", ascending=False).drop(columns=["_ordem"]).reset_index(drop=True)
+    return df
+
+
+def criar_excel_historico_fechamentos(df_historico: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    df_export = df_historico.copy()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df_export.to_excel(writer, index=False, sheet_name="Histórico")
+        workbook = writer.book
+        ws = writer.sheets["Histórico"]
+        header_fmt = workbook.add_format({
+            "bold": True,
+            "bg_color": "#0B2B69",
+            "font_color": "white",
+            "border": 1,
+            "align": "center",
+        })
+        money_fmt = workbook.add_format({"num_format": 'R$ #,##0.00'})
+        number_fmt = workbook.add_format({"num_format": '#,##0.00'})
+        for idx, col in enumerate(df_export.columns):
+            ws.write(0, idx, col, header_fmt)
+            width = max(14, min(45, max([len(str(col))] + [len(str(v)) for v in df_export[col].head(300).fillna("").astype(str)])))
+            if col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"]:
+                ws.set_column(idx, idx, max(width, 16), money_fmt)
+            elif col == "Kg excedente":
+                ws.set_column(idx, idx, max(width, 14), number_fmt)
+            else:
+                ws.set_column(idx, idx, width)
+    return output.getvalue()
+
+
+def criar_pdf_historico_fechamentos(df_historico: pd.DataFrame) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=0.8 * cm,
+        leftMargin=0.8 * cm,
+        topMargin=0.7 * cm,
+        bottomMargin=0.7 * cm,
+    )
+
+    styles = getSampleStyleSheet()
+    style_title = ParagraphStyle(
+        "TituloHistoricoFechamentos",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        spaceAfter=6,
+    )
+    style_small = ParagraphStyle(
+        "SmallHistoricoFechamentos",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=7,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        leading=8,
+    )
+
+    elementos = [
+        Paragraph("HISTÓRICO DE FECHAMENTOS", style_title),
+        Paragraph(f"Gerado em {agora_brasil().strftime('%d/%m/%Y %H:%M')} por {usuario_logado() or 'Usuário não identificado'}", style_small),
+        Spacer(1, 0.25 * cm),
+    ]
+
+    if df_historico is None or df_historico.empty:
+        elementos.append(Paragraph("Nenhum fechamento registrado até o momento.", style_small))
+    else:
+        df_pdf = df_historico.copy()
+        for col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"]:
+            if col in df_pdf.columns:
+                df_pdf[col] = df_pdf[col].apply(moeda)
+        if "Kg excedente" in df_pdf.columns:
+            df_pdf["Kg excedente"] = df_pdf["Kg excedente"].apply(lambda x: f"{float(x or 0):.2f}".replace(".", ","))
+
+        colunas_pdf = [
+            "Data/hora", "Usuário", "Tipo de documento", "Motorista", "Quinzena",
+            "Período inicial", "Período final", "Total de entregas", "Kg excedente", "Total pago",
+        ]
+        colunas_pdf = [c for c in colunas_pdf if c in df_pdf.columns]
+        dados = [colunas_pdf] + df_pdf[colunas_pdf].astype(str).values.tolist()
+        tabela = Table(
+            dados,
+            colWidths=[2.4 * cm, 2.5 * cm, 3.0 * cm, 5.0 * cm, 2.3 * cm, 2.4 * cm, 2.4 * cm, 2.1 * cm, 2.1 * cm, 2.6 * cm],
+            repeatRows=1,
+        )
+        tabela.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#F4B183")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#FBE4D5")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 6.2),
+            ("LEADING", (0, 0), (-1, -1), 7.0),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        elementos.append(tabela)
+
+    doc.build(elementos)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 
@@ -4784,6 +5052,28 @@ else:
                 file_name=f"relatorio_entregas_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
                 mime="application/pdf",
                 use_container_width=True,
+                on_click=registrar_historico_fechamento,
+                args=(montar_registro_fechamento(
+                    "Relatório de entregas",
+                    motorista_recibo,
+                    cnpj_motorista_recibo,
+                    quinzena_recibo,
+                    data_inicio_recibo,
+                    data_fim_recibo,
+                    qtd_recibo,
+                    kg_recibo,
+                    subtotal_recibo,
+                    acareacao_recibo,
+                    bonus_extra_recibo,
+                    bonus_sabados_recibo,
+                    bonus_feriado_recibo,
+                    vale_recibo,
+                    desconto_recibo,
+                    total_recibo,
+                    finalizado_por_pdf,
+                    finalizado_em_pdf,
+                ),),
+                key=f"download_relatorio_{nome_motorista_arquivo}_{data_inicio_recibo}_{data_fim_recibo}_{normalizar_nome_coluna(quinzena_recibo)}",
             )
         with col_pdf_recibo:
             st.download_button(
@@ -4792,6 +5082,28 @@ else:
                 file_name=f"recibo_pagamento_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
                 mime="application/pdf",
                 use_container_width=True,
+                on_click=registrar_historico_fechamento,
+                args=(montar_registro_fechamento(
+                    "Recibo de pagamento",
+                    motorista_recibo,
+                    cnpj_motorista_recibo,
+                    quinzena_recibo,
+                    data_inicio_recibo,
+                    data_fim_recibo,
+                    qtd_recibo,
+                    kg_recibo,
+                    subtotal_recibo,
+                    acareacao_recibo,
+                    bonus_extra_recibo,
+                    bonus_sabados_recibo,
+                    bonus_feriado_recibo,
+                    vale_recibo,
+                    desconto_recibo,
+                    total_recibo,
+                    finalizado_por_pdf,
+                    finalizado_em_pdf,
+                ),),
+                key=f"download_recibo_{nome_motorista_arquivo}_{data_inicio_recibo}_{data_fim_recibo}_{normalizar_nome_coluna(quinzena_recibo)}",
             )
 
 st.markdown("---")
@@ -4847,9 +5159,70 @@ if usuario_pode_extrair_consolidado():
         file_name=f"fechamento_entregadores_{agora_brasil().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
+        on_click=registrar_historico_fechamento,
+        args=(montar_registro_fechamento(
+            "Fechamento consolidado em Excel",
+            motorista_relatorio_excel,
+            obter_cnpj_motorista(motorista_relatorio_excel),
+            quinzena_recibo if 'quinzena_recibo' in globals() else "",
+            data_inicio_relatorio_excel,
+            data_fim_relatorio_excel,
+            qtd_recibo if 'qtd_recibo' in globals() else 0,
+            kg_recibo if 'kg_recibo' in globals() else 0,
+            subtotal_recibo if 'subtotal_recibo' in globals() else 0,
+            acareacao_relatorio_excel,
+            bonus_extra_relatorio_excel,
+            bonus_sabados_relatorio_excel,
+            bonus_feriado_relatorio_excel,
+            vale_relatorio_excel,
+            desconto_relatorio_excel,
+            total_recibo if 'total_recibo' in globals() else 0,
+            finalizado_por_excel,
+            finalizado_em_excel,
+        ),),
+        key="download_fechamento_consolidado_excel",
     )
 else:
     st.warning("Faça login como admin para baixar o fechamento consolidado em Excel.")
+
+st.markdown("---")
+st.markdown('<div class="section-heading">Histórico de fechamentos realizados</div>', unsafe_allow_html=True)
+
+if usuario_admin():
+    df_historico_fechamentos = historico_fechamentos_df()
+    if df_historico_fechamentos.empty:
+        st.info("Nenhum fechamento registrado ainda. O histórico será preenchido quando alguém gerar relatório, recibo ou fechamento consolidado.")
+    else:
+        df_historico_display = df_historico_fechamentos.copy()
+        for col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"]:
+            if col in df_historico_display.columns:
+                df_historico_display[col] = df_historico_display[col].apply(moeda)
+        if "Kg excedente" in df_historico_display.columns:
+            df_historico_display["Kg excedente"] = df_historico_display["Kg excedente"].apply(lambda x: f"{float(x or 0):.2f}".replace(".", ","))
+
+        st.dataframe(df_historico_display, use_container_width=True, hide_index=True, height=320)
+
+        col_hist_excel, col_hist_pdf = st.columns(2)
+        with col_hist_excel:
+            st.download_button(
+                "📥 Baixar histórico em Excel",
+                data=criar_excel_historico_fechamentos(df_historico_fechamentos),
+                file_name=f"historico_fechamentos_{agora_brasil().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_historico_fechamentos_excel",
+            )
+        with col_hist_pdf:
+            st.download_button(
+                "📄 Baixar histórico em PDF",
+                data=criar_pdf_historico_fechamentos(df_historico_fechamentos),
+                file_name=f"historico_fechamentos_{agora_brasil().strftime('%Y%m%d_%H%M')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="download_historico_fechamentos_pdf",
+            )
+else:
+    st.warning("Faça login como admin para visualizar e baixar o histórico de fechamentos.")
 
 st.caption(
     "Regra aplicada: pagamento por entrega realizada sem ocorrência, validando Pedido x Status no Excel e dados da entrega no PDF. "
