@@ -4058,6 +4058,32 @@ if not esta_logado():
     )
     st.stop()
 
+# Atalho do histórico na lateral, logo abaixo do controle de usuários.
+if usuario_admin():
+    with st.sidebar.expander("📋 Histórico de Fechamentos", expanded=False):
+        df_historico_sidebar = historico_fechamentos_df()
+        if df_historico_sidebar.empty:
+            st.info("Nenhum fechamento registrado ainda.")
+        else:
+            st.caption(f"Total de registros: {len(df_historico_sidebar)}")
+            st.download_button(
+                "📥 Baixar Excel",
+                data=criar_excel_historico_fechamentos(df_historico_sidebar),
+                file_name=f"historico_fechamentos_{agora_brasil().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_historico_sidebar_excel",
+            )
+            st.download_button(
+                "📄 Baixar PDF",
+                data=criar_pdf_historico_fechamentos(df_historico_sidebar),
+                file_name=f"historico_fechamentos_{agora_brasil().strftime('%Y%m%d_%H%M')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="download_historico_sidebar_pdf",
+            )
+    st.sidebar.markdown("---")
+
 st.sidebar.header("📁 Arquivos")
 
 if "upload_reset_counter" not in st.session_state:
