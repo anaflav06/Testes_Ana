@@ -5,6 +5,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -32,6 +33,10 @@ st.set_page_config(
     page_icon="🚚",
     layout="wide"
 )
+
+
+def agora_brasil():
+    return datetime.now(ZoneInfo("America/Sao_Paulo"))
 
 
 
@@ -303,7 +308,7 @@ def usuario_pode_extrair_consolidado() -> bool:
 
 def texto_finalizacao() -> Tuple[str, str]:
     usuario = usuario_logado() or "Usuário não identificado"
-    data_hora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    data_hora = agora_brasil().strftime("%d/%m/%Y %H:%M")
     return usuario, data_hora
 
 
@@ -2742,7 +2747,7 @@ def criar_excel_fechamento(
 
         df_auditoria = pd.DataFrame([{
             "Finalizado por": finalizado_por or "Usuário não identificado",
-            "Data/hora da finalização": finalizado_em or datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "Data/hora da finalização": finalizado_em or agora_brasil().strftime("%d/%m/%Y %H:%M"),
             "Motorista do relatório": motorista_relatorio,
             "Período inicial": data_inicio_relatorio,
             "Período final": data_fim_relatorio,
@@ -3124,7 +3129,7 @@ def gerar_relatorio_entregas_pdf(
     elementos.append(Spacer(1, 0.10 * cm))
 
     finalizado_por_pdf = finalizado_por or "Usuário não identificado"
-    finalizado_em_pdf = finalizado_em or datetime.now().strftime("%d/%m/%Y %H:%M")
+    finalizado_em_pdf = finalizado_em or agora_brasil().strftime("%d/%m/%Y %H:%M")
     elementos.append(Paragraph(
         f"Finalizado por: {finalizado_por_pdf} | Data/hora: {finalizado_em_pdf}",
         style_small_center,
@@ -3522,7 +3527,7 @@ def gerar_recibo_pdf(
     elementos.append(Spacer(1, 0.08 * cm))
 
     finalizado_por_pdf = finalizado_por or "Usuário não identificado"
-    finalizado_em_pdf = finalizado_em or datetime.now().strftime("%d/%m/%Y %H:%M")
+    finalizado_em_pdf = finalizado_em or agora_brasil().strftime("%d/%m/%Y %H:%M")
     elementos.append(Paragraph(
         f"Finalizado por: {finalizado_por_pdf} | Data/hora: {finalizado_em_pdf}",
         style_small_right,
@@ -4378,8 +4383,8 @@ with col_rec_q:
     )
 
 _datas_disponiveis = pd.to_datetime(df_dia["Data Rota"], errors="coerce").dropna()
-_data_min = _datas_disponiveis.min().date() if not _datas_disponiveis.empty else datetime.now().date()
-_data_max = _datas_disponiveis.max().date() if not _datas_disponiveis.empty else datetime.now().date()
+_data_min = _datas_disponiveis.min().date() if not _datas_disponiveis.empty else agora_brasil().date()
+_data_max = _datas_disponiveis.max().date() if not _datas_disponiveis.empty else agora_brasil().date()
 
 with col_rec2:
     data_inicio_recibo = st.date_input(
@@ -4839,7 +4844,7 @@ if usuario_pode_extrair_consolidado():
     st.download_button(
         "📥 Baixar fechamento consolidado em Excel",
         data=excel_bytes,
-        file_name=f"fechamento_entregadores_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        file_name=f"fechamento_entregadores_{agora_brasil().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
