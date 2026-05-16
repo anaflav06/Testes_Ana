@@ -281,7 +281,12 @@ def perfil_logado() -> str:
 
 
 def esta_logado() -> bool:
-    return bool(usuario_logado())
+    usuario = usuario_logado()
+    perfil = perfil_logado()
+    if not usuario or perfil not in ["admin", "operador"]:
+        return False
+    usuarios = carregar_usuarios()
+    return any(normalizar_texto(nome) == normalizar_texto(usuario) for nome in usuarios.keys())
 
 
 def usuario_admin() -> bool:
@@ -3764,6 +3769,21 @@ st.markdown(
 # SIDEBAR
 # =========================================================
 renderizar_controle_acesso_sidebar()
+
+# BLOQUEIO TOTAL DA DASHBOARD
+# Nada abaixo deste ponto é carregado antes do login.
+# Isso bloqueia upload de Excel, upload de PDF, limpar cache, processamento, relatórios e exportações.
+if not esta_logado():
+    st.markdown(
+        """
+        <div style="background:#dbeafe;border:1px solid #bfdbfe;border-left:8px solid #2563eb;border-radius:18px;padding:22px 24px;margin-top:10px;color:#1e3a8a;font-size:18px;font-weight:750;line-height:1.6;">
+            🔐 Acesso bloqueado.<br>
+            Faça login na barra lateral com usuário e senha para acessar arquivos, dashboard, relatórios, recibos e exportações.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.stop()
 
 st.sidebar.header("📁 Arquivos")
 
