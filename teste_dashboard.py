@@ -54,6 +54,7 @@ GITHUB_BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
 DATABASE_MOTORISTAS_JSON = "database_motoristas.json"
 DATABASE_PLACAS_JSON = "database_placas.json"
 DATABASE_CEPS_JSON = "database_ceps.json"
+DATABASE_USUARIOS_JSON = "usuarios.json"
 
 
 def github_json_ativo() -> bool:
@@ -182,6 +183,250 @@ def carregar_db_ceps() -> list:
 
 def salvar_db_ceps(dados: list) -> bool:
     return salvar_json_github(DATABASE_CEPS_JSON, _normalizar_db_ceps(dados), "Atualiza database_ceps.json")
+
+
+
+# =========================================================
+# CONTROLE DE ACESSO / USUÁRIOS
+# =========================================================
+ARQUIVO_USUARIOS = Path("usuarios.json")
+USUARIOS_PADRAO = {
+    "Ana Flavia": {"senha": "2305", "perfil": "admin"},
+    "Jessica": {"senha": "2305", "perfil": "admin"},
+}
+USUARIOS_PROTEGIDOS = {"Ana Flavia", "Jessica"}
+
+
+def _normalizar_perfil_usuario(perfil: str) -> str:
+    perfil = str(perfil or "").strip().lower()
+    return perfil if perfil in ["admin", "operador"] else "operador"
+
+
+def _normalizar_usuarios(dados) -> Dict[str, Dict[str, str]]:
+    if not isinstance(dados, dict):
+        dados = {}
+
+    usuarios = {}
+    for nome, info in dados.items():
+        nome_limpo = limpar_texto(nome) if "limpar_texto" in globals() else str(nome).strip()
+        if not nome_limpo:
+            continue
+
+        if isinstance(info, dict):
+            senha = str(info.get("senha", "")).strip()
+            perfil = _normalizar_perfil_usuario(info.get("perfil", "operador"))
+        else:
+            senha = str(info).strip()
+            perfil = "operador"
+
+        if senha:
+            usuarios[nome_limpo] = {"senha": senha, "perfil": perfil}
+
+    # Garante que os dois admins principais sempre existam.
+    for nome, info in USUARIOS_PADRAO.items():
+        if nome not in usuarios:
+            usuarios[nome] = info.copy()
+        else:
+            usuarios[nome]["perfil"] = "admin"
+
+    return usuarios
+
+
+def carregar_usuarios() -> Dict[str, Dict[str, str]]:
+    dados = None
+
+    if github_json_ativo():
+        dados = carregar_json_github(DATABASE_USUARIOS_JSON, "{}")
+
+    if not dados and ARQUIVO_USUARIOS.exists():
+        try:
+            dados = json.loads(ARQUIVO_USUARIOS.read_text(encoding="utf-8"))
+        except Exception:
+            dados = {}
+
+    usuarios = _normalizar_usuarios(dados)
+    if not ARQUIVO_USUARIOS.exists():
+        salvar_usuarios(usuarios)
+    return usuarios
+
+
+def salvar_usuarios(usuarios: Dict[str, Dict[str, str]]) -> bool:
+    usuarios = _normalizar_usuarios(usuarios)
+    salvou_local = False
+
+    try:
+        ARQUIVO_USUARIOS.write_text(
+            json.dumps(usuarios, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        salvou_local = True
+    except Exception:
+        salvou_local = False
+
+    salvou_github = salvar_json_github(
+        DATABASE_USUARIOS_JSON,
+        usuarios,
+        "Atualiza usuarios.json",
+    ) if github_json_ativo() else False
+
+    return salvou_local or salvou_github
+
+
+def usuario_logado() -> str:
+    return str(st.session_state.get("usuario_logado", "") or "").strip()
+
+
+def perfil_logado() -> str:
+    return str(st.session_state.get("perfil_logado", "") or "").strip().lower()
+
+
+def esta_logado() -> bool:
+    return bool(usuario_logado())
+
+
+def usuario_admin() -> bool:
+    return perfil_logado() == "admin"
+
+
+def usuario_pode_gerar_relatorios() -> bool:
+    return perfil_logado() in ["admin", "operador"]
+
+
+def usuario_pode_extrair_consolidado() -> bool:
+    return usuario_admin()
+
+
+def texto_finalizacao() -> Tuple[str, str]:
+    usuario = usuario_logado() or "Usuário não identificado"
+    data_hora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    return usuario, data_hora
+
+
+def registrar_login(nome_usuario: str, perfil: str) -> None:
+    st.session_state["usuario_logado"] = nome_usuario
+    st.session_state["perfil_logado"] = perfil
+
+
+def sair_usuario() -> None:
+    st.session_state.pop("usuario_logado", None)
+    st.session_state.pop("perfil_logado", None)
+
+
+def renderizar_controle_acesso_sidebar() -> None:
+    st.sidebar.header("🔐 Acesso")
+
+    if esta_logado():
+        st.sidebar.success(f"Logado como: {usuario_logado()}")
+        st.sidebar.caption(f"Perfil: {perfil_logado()}")
+        if st.sidebar.button("🚪 Sair", use_container_width=True):
+            sair_usuario()
+            st.rerun()
+    else:
+        usuarios = carregar_usuarios()
+        usuario_input = st.sidebar.text_input("Usuário", key="login_usuario")
+        senha_input = st.sidebar.text_input("Senha", type="password", key="login_senha")
+
+        if st.sidebar.button("Entrar", use_container_width=True):
+            usuario_encontrado = None
+            for nome_usuario in usuarios.keys():
+                if normalizar_texto(nome_usuario) == normalizar_texto(usuario_input):
+                    usuario_encontrado = nome_usuario
+                    break
+
+            if usuario_encontrado and str(usuarios[usuario_encontrado].get("senha", "")) == str(senha_input):
+                registrar_login(usuario_encontrado, usuarios[usuario_encontrado].get("perfil", "operador"))
+                st.sidebar.success("Acesso liberado.")
+                st.rerun()
+            else:
+                st.sidebar.error("Usuário ou senha inválidos.")
+
+    st.sidebar.markdown("---")
+
+    if not esta_logado():
+        st.sidebar.info("Faça login para gerar relatórios, recibos e exportações.")
+        return
+
+    if not usuario_admin():
+        st.sidebar.info("Seu perfil permite gerar relatório e recibo. Cadastro de usuários é exclusivo para admin.")
+        return
+
+    usuarios = carregar_usuarios()
+
+    with st.sidebar.expander("➕ Criar novo usuário", expanded=False):
+        novo_usuario = st.text_input("Nome", key="cadastro_novo_usuario")
+        nova_senha = st.text_input("Senha", type="password", key="cadastro_nova_senha")
+        novo_perfil = st.selectbox("Perfil", ["operador", "admin"], key="cadastro_novo_perfil")
+
+        if st.button("Salvar usuário", use_container_width=True):
+            nome = limpar_texto(novo_usuario)
+            if not nome:
+                st.error("Informe o nome do usuário.")
+            elif not str(nova_senha).strip():
+                st.error("Informe uma senha.")
+            elif any(normalizar_texto(nome) == normalizar_texto(u) for u in usuarios.keys()):
+                st.error("Já existe um usuário com esse nome.")
+            else:
+                usuarios[nome] = {
+                    "senha": str(nova_senha).strip(),
+                    "perfil": _normalizar_perfil_usuario(novo_perfil),
+                }
+                if salvar_usuarios(usuarios):
+                    st.success("Usuário cadastrado com sucesso.")
+                    st.rerun()
+                else:
+                    st.error("Não foi possível salvar o usuário.")
+
+    with st.sidebar.expander("🗑️ Apagar usuário", expanded=False):
+        opcoes_apagar = sorted([u for u in usuarios.keys() if u not in USUARIOS_PROTEGIDOS])
+        usuario_apagar = st.selectbox(
+            "Usuário cadastrado",
+            options=[""] + opcoes_apagar,
+            key="usuario_apagar_select",
+        )
+        confirmar_apagar = st.checkbox("Confirmo que desejo apagar este usuário", key="confirmar_apagar_usuario")
+
+        if st.button("Apagar usuário", use_container_width=True):
+            if not usuario_apagar:
+                st.error("Selecione um usuário para apagar.")
+            elif usuario_apagar in USUARIOS_PROTEGIDOS:
+                st.error("Ana Flavia e Jessica não podem ser apagadas.")
+            elif not confirmar_apagar:
+                st.error("Marque a confirmação para apagar.")
+            else:
+                usuarios.pop(usuario_apagar, None)
+                if salvar_usuarios(usuarios):
+                    st.success("Usuário apagado com sucesso.")
+                    st.rerun()
+                else:
+                    st.error("Não foi possível apagar o usuário.")
+
+    with st.sidebar.expander("🔑 Alterar senha", expanded=False):
+        usuario_senha = st.selectbox(
+            "Usuário",
+            options=[""] + sorted(usuarios.keys()),
+            key="usuario_alterar_senha_select",
+        )
+        nova_senha_usuario = st.text_input("Nova senha", type="password", key="nova_senha_usuario")
+
+        if st.button("Alterar senha", use_container_width=True):
+            if not usuario_senha:
+                st.error("Selecione um usuário.")
+            elif not str(nova_senha_usuario).strip():
+                st.error("Informe a nova senha.")
+            else:
+                usuarios[usuario_senha]["senha"] = str(nova_senha_usuario).strip()
+                if salvar_usuarios(usuarios):
+                    st.success("Senha alterada com sucesso.")
+                    st.rerun()
+                else:
+                    st.error("Não foi possível alterar a senha.")
+
+    with st.sidebar.expander("👥 Usuários cadastrados", expanded=False):
+        df_usuarios = pd.DataFrame(
+            [{"Usuário": nome, "Perfil": info.get("perfil", "operador")} for nome, info in usuarios.items()]
+        ).sort_values("Usuário")
+        st.dataframe(df_usuarios, use_container_width=True, hide_index=True, height=180)
+
 
 
 # =========================================================
@@ -1980,7 +2225,7 @@ def gerar_fechamento_diario(df_pagamento: pd.DataFrame) -> pd.DataFrame:
 
 
 
-def aplicar_rd_fechada_recibo(df_base: pd.DataFrame, rds_fechadas: List[str], valor_rd_fechada: float = 250.0) -> pd.DataFrame:
+def aplicar_rd_fechada_recibo(df_base: pd.DataFrame, rds_fechadas: List[str], valor_rd_fechada: float = 350.0) -> pd.DataFrame:
     """Substitui as rotas selecionadas por uma linha única de RD Fechada.
 
     Regra: quando uma RD é fechada, ela passa a valer somente o valor fixo informado.
@@ -2399,6 +2644,8 @@ def criar_excel_fechamento(
     bonus_extra_relatorio: float = 0.0,
     bonus_sabados_relatorio: float = 0.0,
     bonus_feriado_relatorio: float = 0.0,
+    finalizado_por: str = "",
+    finalizado_em: str = "",
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -2488,6 +2735,15 @@ def criar_excel_fechamento(
         df_entregas.to_excel(writer, index=False, sheet_name="Entregas pagas")
         df_pdf_info.drop(columns=["Texto PDF"], errors="ignore").to_excel(writer, index=False, sheet_name="PDFs lidos")
 
+        df_auditoria = pd.DataFrame([{
+            "Finalizado por": finalizado_por or "Usuário não identificado",
+            "Data/hora da finalização": finalizado_em or datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "Motorista do relatório": motorista_relatorio,
+            "Período inicial": data_inicio_relatorio,
+            "Período final": data_fim_relatorio,
+        }])
+        df_auditoria.to_excel(writer, index=False, sheet_name="Auditoria")
+
         workbook = writer.book
         money_fmt = workbook.add_format({"num_format": 'R$ #,##0.00'})
         header_fmt = workbook.add_format({
@@ -2502,6 +2758,7 @@ def criar_excel_fechamento(
             "Fechamento diario": df_dia_export,
             "Entregas pagas": df_entregas,
             "PDFs lidos": df_pdf_info.drop(columns=["Texto PDF"], errors="ignore"),
+            "Auditoria": df_auditoria,
         }.items():
             ws = writer.sheets[sheet_name]
             for idx, col in enumerate(df.columns):
@@ -2532,6 +2789,8 @@ def gerar_relatorio_entregas_pdf(
     bonus_sabados: float = 0.0,
     bonus_feriado: float = 0.0,
     cnpj_motorista: str = "SEM CNPJ",
+    finalizado_por: str = "",
+    finalizado_em: str = "",
 ) -> bytes:
     """Gera relatório de entregas em PDF resumido por data, CEP, valor, quantidade e total, mantendo totais e demais informações."""
     from reportlab.lib import colors
@@ -2859,8 +3118,10 @@ def gerar_relatorio_entregas_pdf(
     elementos.append(assinatura_motorista)
     elementos.append(Spacer(1, 0.10 * cm))
 
+    finalizado_por_pdf = finalizado_por or "Usuário não identificado"
+    finalizado_em_pdf = finalizado_em or datetime.now().strftime("%d/%m/%Y %H:%M")
     elementos.append(Paragraph(
-        f"Relatório gerado automaticamente em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        f"Finalizado por: {finalizado_por_pdf} | Data/hora: {finalizado_em_pdf}",
         style_small_center,
     ))
 
@@ -2882,6 +3143,8 @@ def gerar_recibo_pdf(
     bonus_sabados: float = 0.0,
     bonus_feriado: float = 0.0,
     cnpj_motorista: str = "SEM CNPJ",
+    finalizado_por: str = "",
+    finalizado_em: str = "",
 ) -> bytes:
     """Gera recibo em PDF com logo GDS, cores claras e fechamento separado por dia e por valor real do CEP."""
     from reportlab.lib import colors
@@ -3253,8 +3516,10 @@ def gerar_recibo_pdf(
     elementos.append(Paragraph(observacao, style_normal))
     elementos.append(Spacer(1, 0.08 * cm))
 
+    finalizado_por_pdf = finalizado_por or "Usuário não identificado"
+    finalizado_em_pdf = finalizado_em or datetime.now().strftime("%d/%m/%Y %H:%M")
     elementos.append(Paragraph(
-        f"Recibo gerado automaticamente em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        f"Finalizado por: {finalizado_por_pdf} | Data/hora: {finalizado_em_pdf}",
         style_small_right,
     ))
 
@@ -3498,6 +3763,8 @@ st.markdown(
 # =========================================================
 # SIDEBAR
 # =========================================================
+renderizar_controle_acesso_sidebar()
+
 st.sidebar.header("📁 Arquivos")
 
 if "upload_reset_counter" not in st.session_state:
@@ -4121,7 +4388,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Opção de RD Fechada: substitui o cálculo normal da rota pelo valor fixo de R$ 250,00.
+# Opção de RD Fechada: substitui o cálculo normal da rota pelo valor fixo de R$ 350,00.
 df_rd_opcoes = df_pagamento.copy()
 df_rd_opcoes["Data Rota DT"] = pd.to_datetime(df_rd_opcoes["Data Rota"], errors="coerce").dt.date
 df_rd_opcoes = df_rd_opcoes[
@@ -4144,7 +4411,7 @@ with col_rd1:
         ["Não", "Sim"],
         horizontal=True,
         index=0,
-        help="Quando marcado como Sim, a RD selecionada passa a valer R$ 250,00 e ignora kg excedente e bônus daquela rota.",
+        help="Quando marcado como Sim, a RD selecionada passa a valer R$ 350,00 e ignora kg excedente e bônus daquela rota.",
     )
 
 with col_rd2:
@@ -4154,12 +4421,12 @@ with col_rd2:
             "Selecione as RDs fechadas",
             options=rds_disponiveis_fechada,
             default=[],
-            help="Cada RD selecionada será paga como RD Fechada no valor fixo de R$ 250,00.",
+            help="Cada RD selecionada será paga como RD Fechada no valor fixo de R$ 350,00.",
         )
         if rds_fechadas_recibo:
-            st.success(f"RD Fechada: {len(rds_fechadas_recibo)} RD(s) × R$ 250,00 = {moeda(len(rds_fechadas_recibo) * 250.0)}")
+            st.success(f"RD Fechada: {len(rds_fechadas_recibo)} RD(s) × R$ 350,00 = {moeda(len(rds_fechadas_recibo) * 350.0)}")
         else:
-            st.info("Selecione uma ou mais RDs para aplicar o valor fechado de R$ 250,00.")
+            st.info("Selecione uma ou mais RDs para aplicar o valor fechado de R$ 350,00.")
     else:
         rds_fechadas_recibo = []
 
@@ -4233,8 +4500,8 @@ df_recibo = df_recibo[
     & (df_recibo["Data Rota DT"] <= data_fim_recibo)
 ].copy()
 
-# Aplica RD Fechada no recibo/relatório: remove o cálculo normal da RD e substitui por R$ 250,00.
-df_recibo = aplicar_rd_fechada_recibo(df_recibo, rds_fechadas_recibo, valor_rd_fechada=250.0)
+# Aplica RD Fechada no recibo/relatório: remove o cálculo normal da RD e substitui por R$ 350,00.
+df_recibo = aplicar_rd_fechada_recibo(df_recibo, rds_fechadas_recibo, valor_rd_fechada=350.0)
 
 # Dados usados para preencher os adicionais no Excel consolidado.
 df_relatorio_entregas_excel = pd.DataFrame()
@@ -4381,10 +4648,10 @@ else:
 
             # Ajuste: o bônus de feriado informado/calculado deve continuar entrando no recibo,
             # no relatório e no Excel consolidado.
-            # A RD Fechada altera somente o valor das RDs selecionadas para R$ 250,00;
+            # A RD Fechada altera somente o valor das RDs selecionadas para R$ 350,00;
             # as demais regras do recibo continuam sendo aplicadas normalmente no fechamento.
 
-        st.info("RD Fechada aplicada somente nas RDs selecionadas. Essas RDs entram apenas com o valor fixo de R$ 250,00 e não recebem kg excedente, bônus de sábado ou bônus de feriado. As demais RDs seguem a regra normal de pagamento.")
+        st.info("RD Fechada aplicada somente nas RDs selecionadas. Essas RDs entram apenas com o valor fixo de R$ 350,00 e não recebem kg excedente, bônus de sábado ou bônus de feriado. As demais RDs seguem a regra normal de pagamento.")
 
     total_recibo = (
         subtotal_recibo
@@ -4443,6 +4710,8 @@ else:
     bonus_sabados_relatorio_excel = bonus_sabados_recibo
     bonus_feriado_relatorio_excel = bonus_feriado_recibo
 
+    finalizado_por_pdf, finalizado_em_pdf = texto_finalizacao()
+
     relatorio_pdf = gerar_relatorio_entregas_pdf(
         df_recibo.drop(columns=["Data Rota DT"], errors="ignore"),
         motorista_recibo,
@@ -4456,6 +4725,8 @@ else:
         bonus_sabados_recibo,
         bonus_feriado_recibo,
         cnpj_motorista=cnpj_motorista_recibo,
+        finalizado_por=finalizado_por_pdf,
+        finalizado_em=finalizado_em_pdf,
     )
 
     recibo_pdf = gerar_recibo_pdf(
@@ -4471,26 +4742,32 @@ else:
         bonus_sabados_recibo,
         bonus_feriado_recibo,
         cnpj_motorista=cnpj_motorista_recibo,
+        finalizado_por=finalizado_por_pdf,
+        finalizado_em=finalizado_em_pdf,
     )
 
     nome_motorista_arquivo = normalizar_nome_coluna(motorista_recibo) or "motorista"
     col_pdf_relatorio, col_pdf_recibo = st.columns(2)
-    with col_pdf_relatorio:
-        st.download_button(
-            "📄 Gerar relatório de entregas",
-            data=relatorio_pdf,
-            file_name=f"relatorio_entregas_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-    with col_pdf_recibo:
-        st.download_button(
-            "🧾 Gerar recibo de pagamento",
-            data=recibo_pdf,
-            file_name=f"recibo_pagamento_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
+
+    if not usuario_pode_gerar_relatorios():
+        st.warning("Faça login na lateral para gerar relatório de entregas e recibo.")
+    else:
+        with col_pdf_relatorio:
+            st.download_button(
+                "📄 Gerar relatório de entregas",
+                data=relatorio_pdf,
+                file_name=f"relatorio_entregas_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        with col_pdf_recibo:
+            st.download_button(
+                "🧾 Gerar recibo de pagamento",
+                data=recibo_pdf,
+                file_name=f"recibo_pagamento_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
 st.markdown("---")
 st.markdown('<div class="section-heading">Entregas consideradas para pagamento</div>', unsafe_allow_html=True)
@@ -4518,6 +4795,8 @@ st.caption(
 st.markdown("---")
 st.markdown('<div class="section-heading">Exportação</div>', unsafe_allow_html=True)
 
+finalizado_por_excel, finalizado_em_excel = texto_finalizacao()
+
 excel_bytes = criar_excel_fechamento(
     df_dia_excel,
     df_pagamento,
@@ -4532,15 +4811,20 @@ excel_bytes = criar_excel_fechamento(
     bonus_extra_relatorio_excel,
     bonus_sabados_relatorio_excel,
     bonus_feriado_relatorio_excel,
+    finalizado_por=finalizado_por_excel,
+    finalizado_em=finalizado_em_excel,
 )
 
-st.download_button(
-    "📥 Baixar fechamento consolidado em Excel",
-    data=excel_bytes,
-    file_name=f"fechamento_entregadores_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-)
+if usuario_pode_extrair_consolidado():
+    st.download_button(
+        "📥 Baixar fechamento consolidado em Excel",
+        data=excel_bytes,
+        file_name=f"fechamento_entregadores_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+else:
+    st.warning("Faça login como admin para baixar o fechamento consolidado em Excel.")
 
 st.caption(
     "Regra aplicada: pagamento por entrega realizada sem ocorrência, validando Pedido x Status no Excel e dados da entrega no PDF. "
