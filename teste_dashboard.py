@@ -5261,4 +5261,3 @@ if usuario_pode_extrair_consolidado():
 else:
     st.warning("Faça login como admin para baixar o fechamento consolidado em Excel.")
 
-
