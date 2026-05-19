@@ -5,6 +5,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -28,10 +29,14 @@ except Exception:
 # CONFIGURAÇÃO DA PÁGINA
 # =========================================================
 st.set_page_config(
-    page_title="Fechamento de Entregadores",
+    page_title="Fechamento de Prestadores de Serviços",
     page_icon="🚚",
     layout="wide"
 )
+
+
+def agora_brasil():
+    return datetime.now(ZoneInfo("America/Sao_Paulo"))
 
 
 
@@ -54,6 +59,8 @@ GITHUB_BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
 DATABASE_MOTORISTAS_JSON = "database_motoristas.json"
 DATABASE_PLACAS_JSON = "database_placas.json"
 DATABASE_CEPS_JSON = "database_ceps.json"
+DATABASE_USUARIOS_JSON = "usuarios.json"
+DATABASE_HISTORICO_FECHAMENTOS_JSON = "historico_fechamentos.json"
 
 
 def github_json_ativo() -> bool:
@@ -182,6 +189,522 @@ def carregar_db_ceps() -> list:
 
 def salvar_db_ceps(dados: list) -> bool:
     return salvar_json_github(DATABASE_CEPS_JSON, _normalizar_db_ceps(dados), "Atualiza database_ceps.json")
+
+
+
+# =========================================================
+# CONTROLE DE ACESSO / USUÁRIOS
+# =========================================================
+ARQUIVO_USUARIOS = Path("usuarios.json")
+USUARIOS_PADRAO = {
+    "Ana Flavia": {"senha": "2305", "perfil": "admin"},
+    "Jessica": {"senha": "2305", "perfil": "admin"},
+}
+USUARIOS_PROTEGIDOS = {"Ana Flavia", "Jessica"}
+
+
+def _normalizar_perfil_usuario(perfil: str) -> str:
+    perfil = str(perfil or "").strip().lower()
+    return perfil if perfil in ["admin", "operador"] else "operador"
+
+
+def _normalizar_usuarios(dados) -> Dict[str, Dict[str, str]]:
+    if not isinstance(dados, dict):
+        dados = {}
+
+    usuarios = {}
+    for nome, info in dados.items():
+        nome_limpo = limpar_texto(nome) if "limpar_texto" in globals() else str(nome).strip()
+        if not nome_limpo:
+            continue
+
+        if isinstance(info, dict):
+            senha = str(info.get("senha", "")).strip()
+            perfil = _normalizar_perfil_usuario(info.get("perfil", "operador"))
+        else:
+            senha = str(info).strip()
+            perfil = "operador"
+
+        if senha:
+            usuarios[nome_limpo] = {"senha": senha, "perfil": perfil}
+
+    # Garante que os dois admins principais sempre existam.
+    for nome, info in USUARIOS_PADRAO.items():
+        if nome not in usuarios:
+            usuarios[nome] = info.copy()
+        else:
+            usuarios[nome]["perfil"] = "admin"
+
+    return usuarios
+
+
+def carregar_usuarios() -> Dict[str, Dict[str, str]]:
+    dados = None
+
+    if github_json_ativo():
+        dados = carregar_json_github(DATABASE_USUARIOS_JSON, "{}")
+
+    if not dados and ARQUIVO_USUARIOS.exists():
+        try:
+            dados = json.loads(ARQUIVO_USUARIOS.read_text(encoding="utf-8"))
+        except Exception:
+            dados = {}
+
+    usuarios = _normalizar_usuarios(dados)
+    if not ARQUIVO_USUARIOS.exists():
+        salvar_usuarios(usuarios)
+    return usuarios
+
+
+def salvar_usuarios(usuarios: Dict[str, Dict[str, str]]) -> bool:
+    usuarios = _normalizar_usuarios(usuarios)
+    salvou_local = False
+
+    try:
+        ARQUIVO_USUARIOS.write_text(
+            json.dumps(usuarios, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        salvou_local = True
+    except Exception:
+        salvou_local = False
+
+    salvou_github = salvar_json_github(
+        DATABASE_USUARIOS_JSON,
+        usuarios,
+        "Atualiza usuarios.json",
+    ) if github_json_ativo() else False
+
+    return salvou_local or salvou_github
+
+
+def usuario_logado() -> str:
+    return str(st.session_state.get("usuario_logado", "") or "").strip()
+
+
+def perfil_logado() -> str:
+    return str(st.session_state.get("perfil_logado", "") or "").strip().lower()
+
+
+def esta_logado() -> bool:
+    usuario = usuario_logado()
+    perfil = perfil_logado()
+    if not usuario or perfil not in ["admin", "operador"]:
+        return False
+    usuarios = carregar_usuarios()
+    return any(normalizar_texto(nome) == normalizar_texto(usuario) for nome in usuarios.keys())
+
+
+def usuario_admin() -> bool:
+    return perfil_logado() == "admin"
+
+
+def usuario_pode_gerar_relatorios() -> bool:
+    return perfil_logado() in ["admin", "operador"]
+
+
+def usuario_pode_extrair_consolidado() -> bool:
+    return usuario_admin()
+
+
+def texto_finalizacao() -> Tuple[str, str]:
+    usuario = usuario_logado() or "Usuário não identificado"
+    data_hora = agora_brasil().strftime("%d/%m/%Y %H:%M")
+    return usuario, data_hora
+
+
+def registrar_login(nome_usuario: str, perfil: str) -> None:
+    st.session_state["usuario_logado"] = nome_usuario
+    st.session_state["perfil_logado"] = perfil
+
+
+def sair_usuario() -> None:
+    st.session_state.pop("usuario_logado", None)
+    st.session_state.pop("perfil_logado", None)
+
+
+def renderizar_controle_acesso_sidebar() -> None:
+    st.sidebar.header("🔐 Acesso")
+
+    if esta_logado():
+        st.sidebar.success(f"Logado como: {usuario_logado()}")
+        st.sidebar.caption(f"Perfil: {perfil_logado()}")
+        if st.sidebar.button("🚪 Sair", use_container_width=True):
+            sair_usuario()
+            st.rerun()
+    else:
+        usuarios = carregar_usuarios()
+        usuario_input = st.sidebar.text_input("Usuário", key="login_usuario")
+        senha_input = st.sidebar.text_input("Senha", type="password", key="login_senha")
+
+        if st.sidebar.button("Entrar", use_container_width=True):
+            usuario_encontrado = None
+            for nome_usuario in usuarios.keys():
+                if normalizar_texto(nome_usuario) == normalizar_texto(usuario_input):
+                    usuario_encontrado = nome_usuario
+                    break
+
+            if usuario_encontrado and str(usuarios[usuario_encontrado].get("senha", "")) == str(senha_input):
+                registrar_login(usuario_encontrado, usuarios[usuario_encontrado].get("perfil", "operador"))
+                st.sidebar.success("Acesso liberado.")
+                st.rerun()
+            else:
+                st.sidebar.error("Usuário ou senha inválidos.")
+
+    st.sidebar.markdown("---")
+
+    if not esta_logado():
+        st.sidebar.info("Faça login para gerar relatórios, recibos e exportações.")
+        return
+
+    if not usuario_admin():
+        st.sidebar.info("Seu perfil permite gerar relatório e recibo. Cadastro de usuários é exclusivo para admin.")
+        return
+
+    usuarios = carregar_usuarios()
+
+    with st.sidebar.expander("➕ Criar novo usuário", expanded=False):
+        novo_usuario = st.text_input("Nome", key="cadastro_novo_usuario")
+        nova_senha = st.text_input("Senha", type="password", key="cadastro_nova_senha")
+        novo_perfil = st.selectbox("Perfil", ["operador", "admin"], key="cadastro_novo_perfil")
+
+        if st.button("Salvar usuário", use_container_width=True):
+            nome = limpar_texto(novo_usuario)
+            if not nome:
+                st.error("Informe o nome do usuário.")
+            elif not str(nova_senha).strip():
+                st.error("Informe uma senha.")
+            elif any(normalizar_texto(nome) == normalizar_texto(u) for u in usuarios.keys()):
+                st.error("Já existe um usuário com esse nome.")
+            else:
+                usuarios[nome] = {
+                    "senha": str(nova_senha).strip(),
+                    "perfil": _normalizar_perfil_usuario(novo_perfil),
+                }
+                if salvar_usuarios(usuarios):
+                    st.success("Usuário cadastrado com sucesso.")
+                    st.rerun()
+                else:
+                    st.error("Não foi possível salvar o usuário.")
+
+    with st.sidebar.expander("🗑️ Apagar usuário", expanded=False):
+        opcoes_apagar = sorted([u for u in usuarios.keys() if u not in USUARIOS_PROTEGIDOS])
+        usuario_apagar = st.selectbox(
+            "Usuário cadastrado",
+            options=[""] + opcoes_apagar,
+            key="usuario_apagar_select",
+        )
+        confirmar_apagar = st.checkbox("Confirmo que desejo apagar este usuário", key="confirmar_apagar_usuario")
+
+        if st.button("Apagar usuário", use_container_width=True):
+            if not usuario_apagar:
+                st.error("Selecione um usuário para apagar.")
+            elif usuario_apagar in USUARIOS_PROTEGIDOS:
+                st.error("Ana Flavia e Jessica não podem ser apagadas.")
+            elif not confirmar_apagar:
+                st.error("Marque a confirmação para apagar.")
+            else:
+                usuarios.pop(usuario_apagar, None)
+                if salvar_usuarios(usuarios):
+                    st.success("Usuário apagado com sucesso.")
+                    st.rerun()
+                else:
+                    st.error("Não foi possível apagar o usuário.")
+
+    with st.sidebar.expander("🔑 Alterar senha", expanded=False):
+        usuario_senha = st.selectbox(
+            "Usuário",
+            options=[""] + sorted(usuarios.keys()),
+            key="usuario_alterar_senha_select",
+        )
+        nova_senha_usuario = st.text_input("Nova senha", type="password", key="nova_senha_usuario")
+
+        if st.button("Alterar senha", use_container_width=True):
+            if not usuario_senha:
+                st.error("Selecione um usuário.")
+            elif not str(nova_senha_usuario).strip():
+                st.error("Informe a nova senha.")
+            else:
+                usuarios[usuario_senha]["senha"] = str(nova_senha_usuario).strip()
+                if salvar_usuarios(usuarios):
+                    st.success("Senha alterada com sucesso.")
+                    st.rerun()
+                else:
+                    st.error("Não foi possível alterar a senha.")
+
+    with st.sidebar.expander("👥 Usuários cadastrados", expanded=False):
+        df_usuarios = pd.DataFrame(
+            [{"Usuário": nome, "Perfil": info.get("perfil", "operador")} for nome, info in usuarios.items()]
+        ).sort_values("Usuário")
+        st.dataframe(df_usuarios, use_container_width=True, hide_index=True, height=180)
+
+
+
+# =========================================================
+# HISTÓRICO DE FECHAMENTOS / AUDITORIA
+# =========================================================
+ARQUIVO_HISTORICO_FECHAMENTOS = Path("historico_fechamentos.json")
+
+
+def _normalizar_historico_fechamentos(dados) -> List[Dict[str, object]]:
+    if isinstance(dados, dict):
+        dados = dados.get("fechamentos", [])
+    if not isinstance(dados, list):
+        return []
+
+    historico = []
+    for item in dados:
+        if not isinstance(item, dict):
+            continue
+        historico.append({
+            "ID": str(item.get("ID", "") or "").strip(),
+            "Data/hora": str(item.get("Data/hora", "") or "").strip(),
+            "Usuário": str(item.get("Usuário", "") or "Usuário não identificado").strip(),
+            "Perfil": str(item.get("Perfil", "") or "").strip(),
+            "Tipo de documento": str(item.get("Tipo de documento", "") or "").strip(),
+            "Motorista": str(item.get("Motorista", "") or "").strip(),
+            "CNPJ": str(item.get("CNPJ", "") or "SEM CNPJ").strip(),
+            "Quinzena": str(item.get("Quinzena", "") or "").strip(),
+            "Período inicial": str(item.get("Período inicial", "") or "").strip(),
+            "Período final": str(item.get("Período final", "") or "").strip(),
+            "Total de entregas": int(float(item.get("Total de entregas", 0) or 0)),
+            "Kg excedente": float(item.get("Kg excedente", 0) or 0),
+            "Subtotal": float(item.get("Subtotal", 0) or 0),
+            "Acareação": float(item.get("Acareação", 0) or 0),
+            "Bônus Extra": float(item.get("Bônus Extra", 0) or 0),
+            "Bônus Sábados": float(item.get("Bônus Sábados", 0) or 0),
+            "Bônus Feriado": float(item.get("Bônus Feriado", 0) or 0),
+            "Vale": float(item.get("Vale", 0) or 0),
+            "Desconto": float(item.get("Desconto", 0) or 0),
+            "Total pago": float(item.get("Total pago", 0) or 0),
+        })
+    return historico
+
+
+def carregar_historico_fechamentos() -> List[Dict[str, object]]:
+    dados = None
+
+    if github_json_ativo():
+        dados = carregar_json_github(DATABASE_HISTORICO_FECHAMENTOS_JSON, "[]")
+
+    if not dados and ARQUIVO_HISTORICO_FECHAMENTOS.exists():
+        try:
+            dados = json.loads(ARQUIVO_HISTORICO_FECHAMENTOS.read_text(encoding="utf-8"))
+        except Exception:
+            dados = []
+
+    historico = _normalizar_historico_fechamentos(dados)
+    if not ARQUIVO_HISTORICO_FECHAMENTOS.exists():
+        salvar_historico_fechamentos(historico)
+    return historico
+
+
+def salvar_historico_fechamentos(historico: List[Dict[str, object]]) -> bool:
+    historico = _normalizar_historico_fechamentos(historico)
+    salvou_local = False
+
+    try:
+        ARQUIVO_HISTORICO_FECHAMENTOS.write_text(
+            json.dumps(historico, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        salvou_local = True
+    except Exception:
+        salvou_local = False
+
+    salvou_github = salvar_json_github(
+        DATABASE_HISTORICO_FECHAMENTOS_JSON,
+        historico,
+        "Atualiza historico_fechamentos.json",
+    ) if github_json_ativo() else False
+
+    return salvou_local or salvou_github
+
+
+def registrar_historico_fechamento(registro: Dict[str, object]) -> None:
+    historico = carregar_historico_fechamentos()
+    registro = dict(registro or {})
+    registro["ID"] = registro.get("ID") or agora_brasil().strftime("%Y%m%d%H%M%S%f")
+    registro["Data/hora"] = registro.get("Data/hora") or agora_brasil().strftime("%d/%m/%Y %H:%M")
+    registro["Usuário"] = registro.get("Usuário") or usuario_logado() or "Usuário não identificado"
+    registro["Perfil"] = registro.get("Perfil") or perfil_logado()
+
+    historico.append(registro)
+    salvar_historico_fechamentos(historico)
+
+
+def montar_registro_fechamento(
+    tipo_documento: str,
+    motorista: str,
+    cnpj_motorista: str,
+    quinzena: str,
+    data_inicio,
+    data_fim,
+    qtd_entregas: int,
+    kg_excedente: float,
+    subtotal: float,
+    acareacao: float,
+    bonus_extra: float,
+    bonus_sabados: float,
+    bonus_feriado: float,
+    vale: float,
+    desconto: float,
+    total_pago: float,
+    finalizado_por: str = "",
+    finalizado_em: str = "",
+) -> Dict[str, object]:
+    return {
+        "Data/hora": finalizado_em or agora_brasil().strftime("%d/%m/%Y %H:%M"),
+        "Usuário": finalizado_por or usuario_logado() or "Usuário não identificado",
+        "Perfil": perfil_logado(),
+        "Tipo de documento": tipo_documento,
+        "Motorista": str(motorista or "").strip(),
+        "CNPJ": str(cnpj_motorista or "SEM CNPJ").strip(),
+        "Quinzena": str(quinzena or "").strip(),
+        "Período inicial": pd.to_datetime(data_inicio, errors="coerce").strftime("%d/%m/%Y") if pd.notna(pd.to_datetime(data_inicio, errors="coerce")) else str(data_inicio or ""),
+        "Período final": pd.to_datetime(data_fim, errors="coerce").strftime("%d/%m/%Y") if pd.notna(pd.to_datetime(data_fim, errors="coerce")) else str(data_fim or ""),
+        "Total de entregas": int(qtd_entregas or 0),
+        "Kg excedente": float(kg_excedente or 0),
+        "Subtotal": float(subtotal or 0),
+        "Acareação": float(acareacao or 0),
+        "Bônus Extra": float(bonus_extra or 0),
+        "Bônus Sábados": float(bonus_sabados or 0),
+        "Bônus Feriado": float(bonus_feriado or 0),
+        "Vale": float(vale or 0),
+        "Desconto": float(desconto or 0),
+        "Total pago": float(total_pago or 0),
+    }
+
+
+def historico_fechamentos_df() -> pd.DataFrame:
+    historico = carregar_historico_fechamentos()
+    colunas = [
+        "Data/hora", "Usuário", "Perfil", "Tipo de documento", "Motorista", "CNPJ", "Quinzena",
+        "Período inicial", "Período final", "Total de entregas", "Kg excedente", "Subtotal",
+        "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago",
+    ]
+    df = pd.DataFrame(historico)
+    for col in colunas:
+        if col not in df.columns:
+            df[col] = "" if col not in ["Total de entregas", "Kg excedente", "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"] else 0
+    df = df[colunas].copy()
+    if not df.empty:
+        df["_ordem"] = pd.to_datetime(df["Data/hora"], dayfirst=True, errors="coerce")
+        df = df.sort_values("_ordem", ascending=False).drop(columns=["_ordem"]).reset_index(drop=True)
+    return df
+
+
+def criar_excel_historico_fechamentos(df_historico: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    df_export = df_historico.copy()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df_export.to_excel(writer, index=False, sheet_name="Histórico")
+        workbook = writer.book
+        ws = writer.sheets["Histórico"]
+        header_fmt = workbook.add_format({
+            "bold": True,
+            "bg_color": "#0B2B69",
+            "font_color": "white",
+            "border": 1,
+            "align": "center",
+        })
+        money_fmt = workbook.add_format({"num_format": 'R$ #,##0.00'})
+        number_fmt = workbook.add_format({"num_format": '#,##0.00'})
+        for idx, col in enumerate(df_export.columns):
+            ws.write(0, idx, col, header_fmt)
+            width = max(14, min(45, max([len(str(col))] + [len(str(v)) for v in df_export[col].head(300).fillna("").astype(str)])))
+            if col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"]:
+                ws.set_column(idx, idx, max(width, 16), money_fmt)
+            elif col == "Kg excedente":
+                ws.set_column(idx, idx, max(width, 14), number_fmt)
+            else:
+                ws.set_column(idx, idx, width)
+    return output.getvalue()
+
+
+def criar_pdf_historico_fechamentos(df_historico: pd.DataFrame) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=0.8 * cm,
+        leftMargin=0.8 * cm,
+        topMargin=0.7 * cm,
+        bottomMargin=0.7 * cm,
+    )
+
+    styles = getSampleStyleSheet()
+    style_title = ParagraphStyle(
+        "TituloHistoricoFechamentos",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        spaceAfter=6,
+    )
+    style_small = ParagraphStyle(
+        "SmallHistoricoFechamentos",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=7,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        leading=8,
+    )
+
+    elementos = [
+        Paragraph("HISTÓRICO DE FECHAMENTOS", style_title),
+        Paragraph(f"Gerado em {agora_brasil().strftime('%d/%m/%Y %H:%M')} por {usuario_logado() or 'Usuário não identificado'}", style_small),
+        Spacer(1, 0.25 * cm),
+    ]
+
+    if df_historico is None or df_historico.empty:
+        elementos.append(Paragraph("Nenhum fechamento registrado até o momento.", style_small))
+    else:
+        df_pdf = df_historico.copy()
+        for col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"]:
+            if col in df_pdf.columns:
+                df_pdf[col] = df_pdf[col].apply(moeda)
+        if "Kg excedente" in df_pdf.columns:
+            df_pdf["Kg excedente"] = df_pdf["Kg excedente"].apply(lambda x: f"{float(x or 0):.2f}".replace(".", ","))
+
+        colunas_pdf = [
+            "Data/hora", "Usuário", "Tipo de documento", "Motorista", "Quinzena",
+            "Período inicial", "Período final", "Total de entregas", "Kg excedente", "Total pago",
+        ]
+        colunas_pdf = [c for c in colunas_pdf if c in df_pdf.columns]
+        dados = [colunas_pdf] + df_pdf[colunas_pdf].astype(str).values.tolist()
+        tabela = Table(
+            dados,
+            colWidths=[2.4 * cm, 2.5 * cm, 3.0 * cm, 5.0 * cm, 2.3 * cm, 2.4 * cm, 2.4 * cm, 2.1 * cm, 2.1 * cm, 2.6 * cm],
+            repeatRows=1,
+        )
+        tabela.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#F4B183")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#FBE4D5")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 6.2),
+            ("LEADING", (0, 0), (-1, -1), 7.0),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        elementos.append(tabela)
+
+    doc.build(elementos)
+    buffer.seek(0)
+    return buffer.getvalue()
+
 
 
 # =========================================================
@@ -1277,9 +1800,6 @@ def ler_excel_colunas_bytes(nome_arquivo: str, conteudo: bytes, sheet_name=0) ->
             sheet_name=sheet_name,
             nrows=0,
             engine=engine,
-            dtype=str,
-            na_filter=False,
-            keep_default_na=False,
         )
         return [limpar_texto(c) for c in df.columns]
     except Exception as e:
@@ -1296,12 +1816,8 @@ def ler_excel_bytes(nome_arquivo: str, conteudo: bytes, sheet_name=0, usecols_tu
     try:
         engine = _engine_excel_mais_rapido(nome_arquivo)
         if usecols_tuple:
-            colunas_desejadas = {limpar_texto(c) for c in usecols_tuple if limpar_texto(c)}
-            colunas_desejadas_norm = {normalizar_nome_coluna(c) for c in colunas_desejadas}
-
-            def usecols(c):
-                nome_limpo = limpar_texto(c)
-                return nome_limpo in colunas_desejadas or normalizar_nome_coluna(nome_limpo) in colunas_desejadas_norm
+            colunas_desejadas = set(usecols_tuple)
+            usecols = lambda c: limpar_texto(c) in colunas_desejadas
         else:
             usecols = None
 
@@ -1310,9 +1826,6 @@ def ler_excel_bytes(nome_arquivo: str, conteudo: bytes, sheet_name=0, usecols_tu
             sheet_name=sheet_name,
             engine=engine,
             usecols=usecols,
-            dtype=str,
-            na_filter=False,
-            keep_default_na=False,
         )
         df = df.dropna(how="all").copy()
         df.columns = [limpar_texto(c) for c in df.columns]
@@ -1363,44 +1876,14 @@ def extrair_texto_pdf(uploaded_file) -> str:
     return extrair_texto_pdf_bytes(uploaded_file.name, uploaded_file.read())
 
 
-@st.cache_data(show_spinner="Juntando os Excels enviados...")
 def carregar_excel_sistema_otimizado(excel_payloads: Tuple[Tuple[str, bytes], ...], colunas_necessarias: Tuple[str, ...]) -> pd.DataFrame:
-    """Carrega 1 ou mais Excels usando somente as colunas necessárias para o fechamento.
-
-    Otimizações importantes:
-    - usa cache por conteúdo do arquivo;
-    - lê somente as colunas selecionadas;
-    - força tudo como texto para evitar conversões lentas/inconsistentes do Excel;
-    - remove linhas totalmente vazias antes do cruzamento.
-    """
+    """Carrega todos os Excels usando somente as colunas necessárias para o fechamento."""
     frames = []
     for nome_arquivo, conteudo in excel_payloads:
         df = ler_excel_bytes(nome_arquivo, conteudo, sheet_name=0, usecols_tuple=colunas_necessarias)
         if not df.empty:
-            df["Arquivo Excel Origem"] = nome_arquivo
             frames.append(df)
-
-    if not frames:
-        return pd.DataFrame()
-
-    df_final = pd.concat(frames, ignore_index=True, copy=False)
-    df_final = df_final.dropna(how="all").copy()
-    return df_final
-
-
-@st.cache_data(show_spinner=False)
-def ler_colunas_excels_payloads(excel_payloads: Tuple[Tuple[str, bytes], ...]) -> List[str]:
-    """Lê o cabeçalho de todos os Excels enviados e devolve uma lista única de colunas."""
-    colunas = []
-    vistos = set()
-    for nome_arquivo, conteudo in excel_payloads:
-        for coluna in ler_excel_colunas_bytes(nome_arquivo, conteudo, sheet_name=0):
-            coluna_limpa = limpar_texto(coluna)
-            chave = normalizar_nome_coluna(coluna_limpa)
-            if coluna_limpa and chave not in vistos:
-                vistos.add(chave)
-                colunas.append(coluna_limpa)
-    return colunas
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 
@@ -1439,7 +1922,7 @@ def extrair_info_pdf(nome_arquivo: str, texto: str) -> Dict[str, object]:
 
     if not motorista:
         for padrao in [
-            r"(?:motorista|entregador|driver)\s*[:\-]?\s*([A-ZÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇÑ ]{4,80})",
+            r"(?:motorista|prestador de serviços|driver)\s*[:\-]?\s*([A-ZÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇÑ ]{4,80})",
             r"(?:nome)\s*[:\-]?\s*([A-ZÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇÑ ]{4,80})",
         ]:
             m = re.search(padrao, texto_limpo, flags=re.I)
@@ -2439,6 +2922,8 @@ def criar_excel_fechamento(
     bonus_extra_relatorio: float = 0.0,
     bonus_sabados_relatorio: float = 0.0,
     bonus_feriado_relatorio: float = 0.0,
+    finalizado_por: str = "",
+    finalizado_em: str = "",
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -2528,6 +3013,15 @@ def criar_excel_fechamento(
         df_entregas.to_excel(writer, index=False, sheet_name="Entregas pagas")
         df_pdf_info.drop(columns=["Texto PDF"], errors="ignore").to_excel(writer, index=False, sheet_name="PDFs lidos")
 
+        df_auditoria = pd.DataFrame([{
+            "Finalizado por": finalizado_por or "Usuário não identificado",
+            "Data/hora da finalização": finalizado_em or agora_brasil().strftime("%d/%m/%Y %H:%M"),
+            "Motorista do relatório": motorista_relatorio,
+            "Período inicial": data_inicio_relatorio,
+            "Período final": data_fim_relatorio,
+        }])
+        df_auditoria.to_excel(writer, index=False, sheet_name="Auditoria")
+
         workbook = writer.book
         money_fmt = workbook.add_format({"num_format": 'R$ #,##0.00'})
         header_fmt = workbook.add_format({
@@ -2542,6 +3036,7 @@ def criar_excel_fechamento(
             "Fechamento diario": df_dia_export,
             "Entregas pagas": df_entregas,
             "PDFs lidos": df_pdf_info.drop(columns=["Texto PDF"], errors="ignore"),
+            "Auditoria": df_auditoria,
         }.items():
             ws = writer.sheets[sheet_name]
             for idx, col in enumerate(df.columns):
@@ -2572,6 +3067,8 @@ def gerar_relatorio_entregas_pdf(
     bonus_sabados: float = 0.0,
     bonus_feriado: float = 0.0,
     cnpj_motorista: str = "SEM CNPJ",
+    finalizado_por: str = "",
+    finalizado_em: str = "",
 ) -> bytes:
     """Gera relatório de entregas em PDF resumido por data, CEP, valor, quantidade e total, mantendo totais e demais informações."""
     from reportlab.lib import colors
@@ -2726,7 +3223,7 @@ def gerar_relatorio_entregas_pdf(
 
     info_table = Table(
         [
-            [p("Nome do Entregador", style_header), p("CNPJ", style_header), p("Quinzena", style_header)],
+            [p("Nome do Prestador de Serviços", style_header), p("CNPJ", style_header), p("Quinzena", style_header)],
             [p(str(motorista).upper()), p(cnpj_txt), p(quinzena_txt)],
             [p("Período", style_header), p("Total de Entregas", style_header), p("Total do Relatório", style_header)],
             [p(periodo_txt), p(str(total_entregas)), p(moeda(total_geral))],
@@ -2899,8 +3396,10 @@ def gerar_relatorio_entregas_pdf(
     elementos.append(assinatura_motorista)
     elementos.append(Spacer(1, 0.10 * cm))
 
+    finalizado_por_pdf = finalizado_por or "Usuário não identificado"
+    finalizado_em_pdf = finalizado_em or agora_brasil().strftime("%d/%m/%Y %H:%M")
     elementos.append(Paragraph(
-        f"Relatório gerado automaticamente em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        f"Finalizado por: {finalizado_por_pdf} | Data/hora: {finalizado_em_pdf}",
         style_small_center,
     ))
 
@@ -2922,6 +3421,8 @@ def gerar_recibo_pdf(
     bonus_sabados: float = 0.0,
     bonus_feriado: float = 0.0,
     cnpj_motorista: str = "SEM CNPJ",
+    finalizado_por: str = "",
+    finalizado_em: str = "",
 ) -> bytes:
     """Gera recibo em PDF com logo GDS, cores claras e fechamento separado por dia e por valor real do CEP."""
     from reportlab.lib import colors
@@ -3078,7 +3579,7 @@ def gerar_recibo_pdf(
     info_table = Table(
         [
             [
-                Paragraph("Nome do Entregador", style_header),
+                Paragraph("Nome do Prestador de Serviços", style_header),
                 Paragraph("CNPJ", style_header),
                 Paragraph("Quinzena", style_header),
             ],
@@ -3225,7 +3726,7 @@ def gerar_recibo_pdf(
     elementos.append(Spacer(1, 0.14 * cm))
 
     assinatura = Table(
-        [[""], ["Assinatura do Entregador"]],
+        [[""], ["Assinatura do Prestador de Serviços"]],
         colWidths=[10.0 * cm],
         hAlign="LEFT",
     )
@@ -3293,8 +3794,10 @@ def gerar_recibo_pdf(
     elementos.append(Paragraph(observacao, style_normal))
     elementos.append(Spacer(1, 0.08 * cm))
 
+    finalizado_por_pdf = finalizado_por or "Usuário não identificado"
+    finalizado_em_pdf = finalizado_em or agora_brasil().strftime("%d/%m/%Y %H:%M")
     elementos.append(Paragraph(
-        f"Recibo gerado automaticamente em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        f"Finalizado por: {finalizado_por_pdf} | Data/hora: {finalizado_em_pdf}",
         style_small_right,
     ))
 
@@ -3479,7 +3982,7 @@ def processar_fechamento_com_progresso(
         atualizar(100, "✅ Fechamento concluído!")
         return df_pdf_info, df_pdf_itens, pd.DataFrame(), pd.DataFrame(), df_bonus_excel, df_metricas_excel, {}
 
-    atualizar(55, "🔄 Cruzando dados...")
+    atualizar(55, "🔄 Analisando dados...")
 
     df_status_cep = preparar_planilha_status_cep(
         df_excel_raw,
@@ -3525,7 +4028,7 @@ def processar_fechamento_com_progresso(
 st.markdown(
     """
     <div class="main-header">
-        <div class="main-header-title">🚚 Fechamento de Entregadores</div>
+        <div class="main-header-title">🚚 Fechamento de Prestadores de Serviços</div>
         <div class="main-header-subtitle">
             Consolidação por PDF: Excel valida Pedido, Status e CEP; PDFs trazem rota, data, placa, motorista e peso.
         </div>
@@ -3538,6 +4041,49 @@ st.markdown(
 # =========================================================
 # SIDEBAR
 # =========================================================
+renderizar_controle_acesso_sidebar()
+
+# BLOQUEIO TOTAL DA DASHBOARD
+# Nada abaixo deste ponto é carregado antes do login.
+# Isso bloqueia upload de Excel, upload de PDF, limpar cache, processamento, relatórios e exportações.
+if not esta_logado():
+    st.markdown(
+        """
+        <div style="background:#dbeafe;border:1px solid #bfdbfe;border-left:8px solid #2563eb;border-radius:18px;padding:22px 24px;margin-top:10px;color:#1e3a8a;font-size:18px;font-weight:750;line-height:1.6;">
+            🔐 Acesso bloqueado.<br>
+            Faça login na barra lateral com usuário e senha para acessar arquivos, dashboard, relatórios, recibos e exportações.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+# Atalho do histórico na lateral, logo abaixo do controle de usuários.
+if usuario_admin():
+    with st.sidebar.expander("📋 Histórico de Fechamentos", expanded=False):
+        df_historico_sidebar = historico_fechamentos_df()
+        if df_historico_sidebar.empty:
+            st.info("Nenhum fechamento registrado ainda.")
+        else:
+            st.caption(f"Total de registros: {len(df_historico_sidebar)}")
+            st.download_button(
+                "📥 Baixar Excel",
+                data=criar_excel_historico_fechamentos(df_historico_sidebar),
+                file_name=f"historico_fechamentos_{agora_brasil().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_historico_sidebar_excel",
+            )
+            st.download_button(
+                "📄 Baixar PDF",
+                data=criar_pdf_historico_fechamentos(df_historico_sidebar),
+                file_name=f"historico_fechamentos_{agora_brasil().strftime('%Y%m%d_%H%M')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="download_historico_sidebar_pdf",
+            )
+    st.sidebar.markdown("---")
+
 st.sidebar.header("📁 Arquivos")
 
 if "upload_reset_counter" not in st.session_state:
@@ -3588,11 +4134,6 @@ if arquivos_pdf_rotas:
         pdf_payloads.append((f.name, f.read()))
 
 pdf_motoristas_tuple = extrair_motoristas_placas_dos_pdfs_cache(tuple(pdf_payloads)) if pdf_payloads else tuple()
-
-if excel_payloads:
-    st.sidebar.caption(f"📄 Excel(s) carregado(s): {len(excel_payloads)}")
-if pdf_payloads:
-    st.sidebar.caption(f"📑 PDF(s) carregado(s): {len(pdf_payloads)}")
 
 st.sidebar.markdown("---")
 st.sidebar.header("👤 Motoristas / CNPJ")
@@ -3872,9 +4413,7 @@ st.sidebar.header("⚙️ Configuração")
 # Agora carrega apenas o cabeçalho; a planilha completa só é lida quando clicar em Processar.
 cols_excel = []
 if excel_payloads:
-    # Considera o cabeçalho de todos os Excels enviados.
-    # Antes olhava somente o primeiro arquivo, o que podia atrapalhar quando o cliente subia 2 planilhas.
-    cols_excel = ler_colunas_excels_payloads(tuple(excel_payloads))
+    cols_excel = ler_excel_colunas_bytes(excel_payloads[0][0], excel_payloads[0][1], sheet_name=0)
 
 if not cols_excel:
     st.info("Carregue a planilha da quinzena para configurar as colunas e gerar o fechamento.")
@@ -3891,7 +4430,7 @@ col_motivo_indicador_auto = detectar_coluna(df_sistema_raw, ["Motivo 1", "motivo
 col_cep_auto = detectar_coluna(df_sistema_raw, ["cep", "cep destino", "cep entrega"])
 col_rota_auto = detectar_coluna(df_sistema_raw, ["carga", "rota", "route", "manifesto", "romaneio"])
 col_data_excel_auto = detectar_coluna(df_sistema_raw, ["data", "data entrega", "data rota", "data baixa", "dt entrega", "dt baixa", "finalizado em"])
-col_motorista_excel_auto = detectar_coluna(df_sistema_raw, ["motorista", "entregador", "driver", "nome motorista", "nome entregador", "prestador"])
+col_motorista_excel_auto = detectar_coluna(df_sistema_raw, ["motorista", "prestador de serviços", "driver", "nome motorista", "nome prestador de serviçoes", "prestador"])
 
 cols = df_sistema_raw.columns.tolist()
 
@@ -4085,14 +4624,14 @@ motoristas = sorted([
     if m
 ])
 
-st.markdown('<div class="section-heading">Fechamento diário por entregador</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-heading">Fechamento diário por prestador de serviços</div>', unsafe_allow_html=True)
 
 motoristas_disponiveis_fechamento = sorted(
     df_dia["Motorista Final"].dropna().astype(str).str.strip().unique()
 ) if "Motorista Final" in df_dia.columns else []
 motoristas_disponiveis_fechamento = [m for m in motoristas_disponiveis_fechamento if m]
 
-motorista_filtro = st.multiselect("Filtrar entregador", motoristas_disponiveis_fechamento, default=motoristas_disponiveis_fechamento)
+motorista_filtro = st.multiselect("Filtrar prestador de serviços", motoristas_disponiveis_fechamento, default=motoristas_disponiveis_fechamento)
 
 df_dia_view = df_dia.copy()
 if motorista_filtro:
@@ -4138,8 +4677,8 @@ with col_rec_q:
     )
 
 _datas_disponiveis = pd.to_datetime(df_dia["Data Rota"], errors="coerce").dropna()
-_data_min = _datas_disponiveis.min().date() if not _datas_disponiveis.empty else datetime.now().date()
-_data_max = _datas_disponiveis.max().date() if not _datas_disponiveis.empty else datetime.now().date()
+_data_min = _datas_disponiveis.min().date() if not _datas_disponiveis.empty else agora_brasil().date()
+_data_max = _datas_disponiveis.max().date() if not _datas_disponiveis.empty else agora_brasil().date()
 
 with col_rec2:
     data_inicio_recibo = st.date_input(
@@ -4385,12 +4924,21 @@ else:
         st.info("Bônus de sábado foi conferido, mas só pode ser pago/aplicado na 2ª quinzena.")
 
     if quinzena_recibo == "2ª Quinzena":
-        bonus_feriado_recibo, qtd_entregas_feriado = calcular_bonus_feriados_excel(
-            df_bonus_excel,
-            motorista_recibo,
-            datas_feriado,
-            valor_bonus_por_entrega,
-        )
+        if datas_feriado and not df_recibo.empty and "Data Rota" in df_recibo.columns:
+            df_feriado_recibo = df_recibo.copy()
+            df_feriado_recibo["Data Rota DT"] = pd.to_datetime(
+                df_feriado_recibo["Data Rota"],
+                errors="coerce",
+            ).dt.date
+            df_feriado_recibo = df_feriado_recibo[
+                df_feriado_recibo["Data Rota DT"].isin(set(datas_feriado))
+            ].copy()
+
+            qtd_entregas_feriado = int(len(df_feriado_recibo))
+            bonus_feriado_recibo = qtd_entregas_feriado * max(0.0, to_float(valor_bonus_por_entrega))
+        else:
+            bonus_feriado_recibo = 0.0
+            qtd_entregas_feriado = 0
 
         if datas_feriado:
             st.info(
@@ -4490,6 +5038,8 @@ else:
     bonus_sabados_relatorio_excel = bonus_sabados_recibo
     bonus_feriado_relatorio_excel = bonus_feriado_recibo
 
+    finalizado_por_pdf, finalizado_em_pdf = texto_finalizacao()
+
     relatorio_pdf = gerar_relatorio_entregas_pdf(
         df_recibo.drop(columns=["Data Rota DT"], errors="ignore"),
         motorista_recibo,
@@ -4503,6 +5053,8 @@ else:
         bonus_sabados_recibo,
         bonus_feriado_recibo,
         cnpj_motorista=cnpj_motorista_recibo,
+        finalizado_por=finalizado_por_pdf,
+        finalizado_em=finalizado_em_pdf,
     )
 
     recibo_pdf = gerar_recibo_pdf(
@@ -4518,26 +5070,76 @@ else:
         bonus_sabados_recibo,
         bonus_feriado_recibo,
         cnpj_motorista=cnpj_motorista_recibo,
+        finalizado_por=finalizado_por_pdf,
+        finalizado_em=finalizado_em_pdf,
     )
 
     nome_motorista_arquivo = normalizar_nome_coluna(motorista_recibo) or "motorista"
     col_pdf_relatorio, col_pdf_recibo = st.columns(2)
-    with col_pdf_relatorio:
-        st.download_button(
-            "📄 Gerar relatório de entregas",
-            data=relatorio_pdf,
-            file_name=f"relatorio_entregas_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-    with col_pdf_recibo:
-        st.download_button(
-            "🧾 Gerar recibo de pagamento",
-            data=recibo_pdf,
-            file_name=f"recibo_pagamento_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
+
+    if not usuario_pode_gerar_relatorios():
+        st.warning("Faça login na lateral para gerar relatório de entregas e recibo.")
+    else:
+        with col_pdf_relatorio:
+            st.download_button(
+                "📄 Gerar relatório de entregas",
+                data=relatorio_pdf,
+                file_name=f"relatorio_entregas_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                on_click=registrar_historico_fechamento,
+                args=(montar_registro_fechamento(
+                    "Relatório de entregas",
+                    motorista_recibo,
+                    cnpj_motorista_recibo,
+                    quinzena_recibo,
+                    data_inicio_recibo,
+                    data_fim_recibo,
+                    qtd_recibo,
+                    kg_recibo,
+                    subtotal_recibo,
+                    acareacao_recibo,
+                    bonus_extra_recibo,
+                    bonus_sabados_recibo,
+                    bonus_feriado_recibo,
+                    vale_recibo,
+                    desconto_recibo,
+                    total_recibo,
+                    finalizado_por_pdf,
+                    finalizado_em_pdf,
+                ),),
+                key=f"download_relatorio_{nome_motorista_arquivo}_{data_inicio_recibo}_{data_fim_recibo}_{normalizar_nome_coluna(quinzena_recibo)}",
+            )
+        with col_pdf_recibo:
+            st.download_button(
+                "🧾 Gerar recibo de pagamento",
+                data=recibo_pdf,
+                file_name=f"recibo_pagamento_{nome_motorista_arquivo}_{normalizar_nome_coluna(quinzena_recibo)}_{data_inicio_recibo.strftime('%Y%m%d')}_{data_fim_recibo.strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                on_click=registrar_historico_fechamento,
+                args=(montar_registro_fechamento(
+                    "Recibo de pagamento",
+                    motorista_recibo,
+                    cnpj_motorista_recibo,
+                    quinzena_recibo,
+                    data_inicio_recibo,
+                    data_fim_recibo,
+                    qtd_recibo,
+                    kg_recibo,
+                    subtotal_recibo,
+                    acareacao_recibo,
+                    bonus_extra_recibo,
+                    bonus_sabados_recibo,
+                    bonus_feriado_recibo,
+                    vale_recibo,
+                    desconto_recibo,
+                    total_recibo,
+                    finalizado_por_pdf,
+                    finalizado_em_pdf,
+                ),),
+                key=f"download_recibo_{nome_motorista_arquivo}_{data_inicio_recibo}_{data_fim_recibo}_{normalizar_nome_coluna(quinzena_recibo)}",
+            )
 
 st.markdown("---")
 st.markdown('<div class="section-heading">Entregas consideradas para pagamento</div>', unsafe_allow_html=True)
@@ -4565,6 +5167,8 @@ st.caption(
 st.markdown("---")
 st.markdown('<div class="section-heading">Exportação</div>', unsafe_allow_html=True)
 
+finalizado_por_excel, finalizado_em_excel = texto_finalizacao()
+
 excel_bytes = criar_excel_fechamento(
     df_dia_excel,
     df_pagamento,
@@ -4579,17 +5183,40 @@ excel_bytes = criar_excel_fechamento(
     bonus_extra_relatorio_excel,
     bonus_sabados_relatorio_excel,
     bonus_feriado_relatorio_excel,
+    finalizado_por=finalizado_por_excel,
+    finalizado_em=finalizado_em_excel,
 )
 
-st.download_button(
-    "📥 Baixar fechamento consolidado em Excel",
-    data=excel_bytes,
-    file_name=f"fechamento_entregadores_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-)
+if usuario_pode_extrair_consolidado():
+    st.download_button(
+        "📥 Baixar fechamento consolidado em Excel",
+        data=excel_bytes,
+        file_name=f"fechamento_prestadores_de_serviços_{agora_brasil().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        on_click=registrar_historico_fechamento,
+        args=(montar_registro_fechamento(
+            "Fechamento consolidado em Excel",
+            motorista_relatorio_excel,
+            obter_cnpj_motorista(motorista_relatorio_excel),
+            quinzena_recibo if 'quinzena_recibo' in globals() else "",
+            data_inicio_relatorio_excel,
+            data_fim_relatorio_excel,
+            qtd_recibo if 'qtd_recibo' in globals() else 0,
+            kg_recibo if 'kg_recibo' in globals() else 0,
+            subtotal_recibo if 'subtotal_recibo' in globals() else 0,
+            acareacao_relatorio_excel,
+            bonus_extra_relatorio_excel,
+            bonus_sabados_relatorio_excel,
+            bonus_feriado_relatorio_excel,
+            vale_relatorio_excel,
+            desconto_relatorio_excel,
+            total_recibo if 'total_recibo' in globals() else 0,
+            finalizado_por_excel,
+            finalizado_em_excel,
+        ),),
+        key="download_fechamento_consolidado_excel",
+    )
+else:
+    st.warning("Faça login como admin para baixar o fechamento consolidado em Excel.")
 
-st.caption(
-    "Regra aplicada: pagamento por entrega realizada sem ocorrência, validando Pedido x Status no Excel e dados da entrega no PDF. "
-    "KG_Excedente_Calculado: somente o que passou de 10kg em cada entrega, calculado a R$ 0,30 por kg excedente."
-)
