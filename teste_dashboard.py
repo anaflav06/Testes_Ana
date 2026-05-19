@@ -456,6 +456,10 @@ def _normalizar_historico_fechamentos(dados) -> List[Dict[str, object]]:
     for item in dados:
         if not isinstance(item, dict):
             continue
+        total_entregas = int(float(item.get("Total Entregas", item.get("Total de entregas", 0)) or 0))
+        total_kg_excedente = float(item.get("Total Kg Excedente", item.get("Kg excedente", 0)) or 0)
+        total_do_recibo = float(item.get("Total do Recibo", item.get("Total pago", 0)) or 0)
+
         historico.append({
             "ID": str(item.get("ID", "") or "").strip(),
             "Data/hora": str(item.get("Data/hora", "") or "").strip(),
@@ -467,8 +471,8 @@ def _normalizar_historico_fechamentos(dados) -> List[Dict[str, object]]:
             "Quinzena": str(item.get("Quinzena", "") or "").strip(),
             "Período inicial": str(item.get("Período inicial", "") or "").strip(),
             "Período final": str(item.get("Período final", "") or "").strip(),
-            "Total de entregas": int(float(item.get("Total de entregas", 0) or 0)),
-            "Kg excedente": float(item.get("Kg excedente", 0) or 0),
+            "Total Entregas": total_entregas,
+            "Total Kg Excedente": total_kg_excedente,
             "Subtotal": float(item.get("Subtotal", 0) or 0),
             "Acareação": float(item.get("Acareação", 0) or 0),
             "Bônus Extra": float(item.get("Bônus Extra", 0) or 0),
@@ -476,7 +480,11 @@ def _normalizar_historico_fechamentos(dados) -> List[Dict[str, object]]:
             "Bônus Feriado": float(item.get("Bônus Feriado", 0) or 0),
             "Vale": float(item.get("Vale", 0) or 0),
             "Desconto": float(item.get("Desconto", 0) or 0),
-            "Total pago": float(item.get("Total pago", 0) or 0),
+            "Total do Recibo": total_do_recibo,
+            # Campos antigos mantidos por compatibilidade com históricos já gravados.
+            "Total de entregas": total_entregas,
+            "Kg excedente": total_kg_excedente,
+            "Total pago": total_do_recibo,
         })
     return historico
 
@@ -563,8 +571,8 @@ def montar_registro_fechamento(
         "Quinzena": str(quinzena or "").strip(),
         "Período inicial": pd.to_datetime(data_inicio, errors="coerce").strftime("%d/%m/%Y") if pd.notna(pd.to_datetime(data_inicio, errors="coerce")) else str(data_inicio or ""),
         "Período final": pd.to_datetime(data_fim, errors="coerce").strftime("%d/%m/%Y") if pd.notna(pd.to_datetime(data_fim, errors="coerce")) else str(data_fim or ""),
-        "Total de entregas": int(qtd_entregas or 0),
-        "Kg excedente": float(kg_excedente or 0),
+        "Total Entregas": int(qtd_entregas or 0),
+        "Total Kg Excedente": float(kg_excedente or 0),
         "Subtotal": float(subtotal or 0),
         "Acareação": float(acareacao or 0),
         "Bônus Extra": float(bonus_extra or 0),
@@ -572,6 +580,10 @@ def montar_registro_fechamento(
         "Bônus Feriado": float(bonus_feriado or 0),
         "Vale": float(vale or 0),
         "Desconto": float(desconto or 0),
+        "Total do Recibo": float(total_pago or 0),
+        # Campos antigos mantidos por compatibilidade com históricos já gravados.
+        "Total de entregas": int(qtd_entregas or 0),
+        "Kg excedente": float(kg_excedente or 0),
         "Total pago": float(total_pago or 0),
     }
 
@@ -580,13 +592,22 @@ def historico_fechamentos_df() -> pd.DataFrame:
     historico = carregar_historico_fechamentos()
     colunas = [
         "Data/hora", "Usuário", "Perfil", "Tipo de documento", "Motorista", "CNPJ", "Quinzena",
-        "Período inicial", "Período final", "Total de entregas", "Kg excedente", "Subtotal",
-        "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago",
+        "Período inicial", "Período final", "Total Entregas", "Total Kg Excedente", "Subtotal",
+        "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total do Recibo",
     ]
     df = pd.DataFrame(historico)
+
+    # Compatibilidade com históricos antigos que tinham nomes anteriores.
+    if "Total Entregas" not in df.columns and "Total de entregas" in df.columns:
+        df["Total Entregas"] = df["Total de entregas"]
+    if "Total Kg Excedente" not in df.columns and "Kg excedente" in df.columns:
+        df["Total Kg Excedente"] = df["Kg excedente"]
+    if "Total do Recibo" not in df.columns and "Total pago" in df.columns:
+        df["Total do Recibo"] = df["Total pago"]
+
     for col in colunas:
         if col not in df.columns:
-            df[col] = "" if col not in ["Total de entregas", "Kg excedente", "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"] else 0
+            df[col] = "" if col not in ["Total Entregas", "Total Kg Excedente", "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total do Recibo"] else 0
     df = df[colunas].copy()
     if not df.empty:
         df["_ordem"] = pd.to_datetime(df["Data/hora"], dayfirst=True, errors="coerce")
@@ -613,9 +634,9 @@ def criar_excel_historico_fechamentos(df_historico: pd.DataFrame) -> bytes:
         for idx, col in enumerate(df_export.columns):
             ws.write(0, idx, col, header_fmt)
             width = max(14, min(45, max([len(str(col))] + [len(str(v)) for v in df_export[col].head(300).fillna("").astype(str)])))
-            if col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"]:
+            if col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago", "Total do Recibo"]:
                 ws.set_column(idx, idx, max(width, 16), money_fmt)
-            elif col == "Kg excedente":
+            elif col in ["Kg excedente", "Total Kg Excedente"]:
                 ws.set_column(idx, idx, max(width, 14), number_fmt)
             else:
                 ws.set_column(idx, idx, width)
@@ -670,15 +691,17 @@ def criar_pdf_historico_fechamentos(df_historico: pd.DataFrame) -> bytes:
         elementos.append(Paragraph("Nenhum fechamento registrado até o momento.", style_small))
     else:
         df_pdf = df_historico.copy()
-        for col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago"]:
+        for col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago", "Total do Recibo"]:
             if col in df_pdf.columns:
                 df_pdf[col] = df_pdf[col].apply(moeda)
-        if "Kg excedente" in df_pdf.columns:
+        if "Total Kg Excedente" in df_pdf.columns:
+            df_pdf["Total Kg Excedente"] = df_pdf["Total Kg Excedente"].apply(lambda x: f"{float(x or 0):.2f}".replace(".", ","))
+        elif "Kg excedente" in df_pdf.columns:
             df_pdf["Kg excedente"] = df_pdf["Kg excedente"].apply(lambda x: f"{float(x or 0):.2f}".replace(".", ","))
 
         colunas_pdf = [
             "Data/hora", "Usuário", "Tipo de documento", "Motorista", "Quinzena",
-            "Período inicial", "Período final", "Total de entregas", "Kg excedente", "Total pago",
+            "Período inicial", "Período final", "Total Entregas", "Total Kg Excedente", "Total do Recibo",
         ]
         colunas_pdf = [c for c in colunas_pdf if c in df_pdf.columns]
         dados = [colunas_pdf] + df_pdf[colunas_pdf].astype(str).values.tolist()
