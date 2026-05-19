@@ -456,10 +456,6 @@ def _normalizar_historico_fechamentos(dados) -> List[Dict[str, object]]:
     for item in dados:
         if not isinstance(item, dict):
             continue
-        total_entregas = int(float(item.get("Total Entregas", item.get("Total de entregas", 0)) or 0))
-        total_kg_excedente = float(item.get("Total Kg Excedente", item.get("Kg excedente", 0)) or 0)
-        total_do_recibo = float(item.get("Total do Recibo", item.get("Total pago", 0)) or 0)
-
         historico.append({
             "ID": str(item.get("ID", "") or "").strip(),
             "Data/hora": str(item.get("Data/hora", "") or "").strip(),
@@ -471,8 +467,10 @@ def _normalizar_historico_fechamentos(dados) -> List[Dict[str, object]]:
             "Quinzena": str(item.get("Quinzena", "") or "").strip(),
             "Período inicial": str(item.get("Período inicial", "") or "").strip(),
             "Período final": str(item.get("Período final", "") or "").strip(),
-            "Total Entregas": total_entregas,
-            "Total Kg Excedente": total_kg_excedente,
+            "Quantidade de entregas": int(float(item.get("Quantidade de entregas", item.get("Total de entregas", 0)) or 0)),
+            "Kg excedente": float(item.get("Kg excedente", 0) or 0),
+            "Total Entregas": float(item.get("Total Entregas", max(0.0, float(item.get("Subtotal", 0) or 0) - float(item.get("Total Kg Excedente", float(item.get("Kg excedente", 0) or 0) * 0.30) or 0))) or 0),
+            "Total Kg Excedente": float(item.get("Total Kg Excedente", float(item.get("Kg excedente", 0) or 0) * 0.30) or 0),
             "Subtotal": float(item.get("Subtotal", 0) or 0),
             "Acareação": float(item.get("Acareação", 0) or 0),
             "Bônus Extra": float(item.get("Bônus Extra", 0) or 0),
@@ -480,11 +478,7 @@ def _normalizar_historico_fechamentos(dados) -> List[Dict[str, object]]:
             "Bônus Feriado": float(item.get("Bônus Feriado", 0) or 0),
             "Vale": float(item.get("Vale", 0) or 0),
             "Desconto": float(item.get("Desconto", 0) or 0),
-            "Total do Recibo": total_do_recibo,
-            # Campos antigos mantidos por compatibilidade com históricos já gravados.
-            "Total de entregas": total_entregas,
-            "Kg excedente": total_kg_excedente,
-            "Total pago": total_do_recibo,
+            "Total do Recibo": float(item.get("Total do Recibo", item.get("Total pago", 0)) or 0),
         })
     return historico
 
@@ -560,7 +554,19 @@ def montar_registro_fechamento(
     total_pago: float,
     finalizado_por: str = "",
     finalizado_em: str = "",
+    total_entregas_valor: Optional[float] = None,
+    total_kg_excedente_valor: Optional[float] = None,
 ) -> Dict[str, object]:
+    total_kg_excedente_valor_calc = (
+        float(total_kg_excedente_valor)
+        if total_kg_excedente_valor is not None
+        else float(kg_excedente or 0) * 0.30
+    )
+    total_entregas_valor_calc = (
+        float(total_entregas_valor)
+        if total_entregas_valor is not None
+        else max(0.0, float(subtotal or 0) - total_kg_excedente_valor_calc)
+    )
     return {
         "Data/hora": finalizado_em or agora_brasil().strftime("%d/%m/%Y %H:%M"),
         "Usuário": finalizado_por or usuario_logado() or "Usuário não identificado",
@@ -571,8 +577,10 @@ def montar_registro_fechamento(
         "Quinzena": str(quinzena or "").strip(),
         "Período inicial": pd.to_datetime(data_inicio, errors="coerce").strftime("%d/%m/%Y") if pd.notna(pd.to_datetime(data_inicio, errors="coerce")) else str(data_inicio or ""),
         "Período final": pd.to_datetime(data_fim, errors="coerce").strftime("%d/%m/%Y") if pd.notna(pd.to_datetime(data_fim, errors="coerce")) else str(data_fim or ""),
-        "Total Entregas": int(qtd_entregas or 0),
-        "Total Kg Excedente": float(kg_excedente or 0),
+        "Quantidade de entregas": int(qtd_entregas or 0),
+        "Kg excedente": float(kg_excedente or 0),
+        "Total Entregas": float(total_entregas_valor_calc or 0),
+        "Total Kg Excedente": float(total_kg_excedente_valor_calc or 0),
         "Subtotal": float(subtotal or 0),
         "Acareação": float(acareacao or 0),
         "Bônus Extra": float(bonus_extra or 0),
@@ -581,10 +589,6 @@ def montar_registro_fechamento(
         "Vale": float(vale or 0),
         "Desconto": float(desconto or 0),
         "Total do Recibo": float(total_pago or 0),
-        # Campos antigos mantidos por compatibilidade com históricos já gravados.
-        "Total de entregas": int(qtd_entregas or 0),
-        "Kg excedente": float(kg_excedente or 0),
-        "Total pago": float(total_pago or 0),
     }
 
 
@@ -592,22 +596,19 @@ def historico_fechamentos_df() -> pd.DataFrame:
     historico = carregar_historico_fechamentos()
     colunas = [
         "Data/hora", "Usuário", "Perfil", "Tipo de documento", "Motorista", "CNPJ", "Quinzena",
-        "Período inicial", "Período final", "Total Entregas", "Total Kg Excedente", "Subtotal",
-        "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total do Recibo",
+        "Período inicial", "Período final", "Quantidade de entregas", "Kg excedente", "Total Entregas",
+        "Total Kg Excedente", "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados",
+        "Bônus Feriado", "Vale", "Desconto", "Total do Recibo",
+    ]
+    colunas_numericas = [
+        "Quantidade de entregas", "Kg excedente", "Total Entregas", "Total Kg Excedente",
+        "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado",
+        "Vale", "Desconto", "Total do Recibo",
     ]
     df = pd.DataFrame(historico)
-
-    # Compatibilidade com históricos antigos que tinham nomes anteriores.
-    if "Total Entregas" not in df.columns and "Total de entregas" in df.columns:
-        df["Total Entregas"] = df["Total de entregas"]
-    if "Total Kg Excedente" not in df.columns and "Kg excedente" in df.columns:
-        df["Total Kg Excedente"] = df["Kg excedente"]
-    if "Total do Recibo" not in df.columns and "Total pago" in df.columns:
-        df["Total do Recibo"] = df["Total pago"]
-
     for col in colunas:
         if col not in df.columns:
-            df[col] = "" if col not in ["Total Entregas", "Total Kg Excedente", "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total do Recibo"] else 0
+            df[col] = 0 if col in colunas_numericas else ""
     df = df[colunas].copy()
     if not df.empty:
         df["_ordem"] = pd.to_datetime(df["Data/hora"], dayfirst=True, errors="coerce")
@@ -634,9 +635,9 @@ def criar_excel_historico_fechamentos(df_historico: pd.DataFrame) -> bytes:
         for idx, col in enumerate(df_export.columns):
             ws.write(0, idx, col, header_fmt)
             width = max(14, min(45, max([len(str(col))] + [len(str(v)) for v in df_export[col].head(300).fillna("").astype(str)])))
-            if col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago", "Total do Recibo"]:
+            if col in ["Total Entregas", "Total Kg Excedente", "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total do Recibo"]:
                 ws.set_column(idx, idx, max(width, 16), money_fmt)
-            elif col in ["Kg excedente", "Total Kg Excedente"]:
+            elif col == "Kg excedente":
                 ws.set_column(idx, idx, max(width, 14), number_fmt)
             else:
                 ws.set_column(idx, idx, width)
@@ -691,36 +692,45 @@ def criar_pdf_historico_fechamentos(df_historico: pd.DataFrame) -> bytes:
         elementos.append(Paragraph("Nenhum fechamento registrado até o momento.", style_small))
     else:
         df_pdf = df_historico.copy()
-        for col in ["Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total pago", "Total do Recibo"]:
+        for col in ["Total Entregas", "Total Kg Excedente", "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total do Recibo"]:
             if col in df_pdf.columns:
                 df_pdf[col] = df_pdf[col].apply(moeda)
-        if "Total Kg Excedente" in df_pdf.columns:
-            df_pdf["Total Kg Excedente"] = df_pdf["Total Kg Excedente"].apply(lambda x: f"{float(x or 0):.2f}".replace(".", ","))
-        elif "Kg excedente" in df_pdf.columns:
+        if "Kg excedente" in df_pdf.columns:
             df_pdf["Kg excedente"] = df_pdf["Kg excedente"].apply(lambda x: f"{float(x or 0):.2f}".replace(".", ","))
+        if "Quantidade de entregas" in df_pdf.columns:
+            df_pdf["Quantidade de entregas"] = df_pdf["Quantidade de entregas"].apply(lambda x: str(int(float(x or 0))))
 
         colunas_pdf = [
             "Data/hora", "Usuário", "Tipo de documento", "Motorista", "Quinzena",
-            "Período inicial", "Período final", "Total Entregas", "Total Kg Excedente", "Total do Recibo",
+            "Período inicial", "Período final", "Quantidade de entregas", "Kg excedente",
+            "Total Entregas", "Total Kg Excedente", "Subtotal", "Acareação", "Bônus Extra",
+            "Bônus Sábados", "Bônus Feriado", "Vale", "Desconto", "Total do Recibo",
         ]
         colunas_pdf = [c for c in colunas_pdf if c in df_pdf.columns]
         dados = [colunas_pdf] + df_pdf[colunas_pdf].astype(str).values.tolist()
         tabela = Table(
             dados,
-            colWidths=[2.4 * cm, 2.5 * cm, 3.0 * cm, 5.0 * cm, 2.3 * cm, 2.4 * cm, 2.4 * cm, 2.1 * cm, 2.1 * cm, 2.6 * cm],
+            colWidths=[
+                1.55 * cm, 1.55 * cm, 2.15 * cm, 3.1 * cm, 1.45 * cm,
+                1.55 * cm, 1.55 * cm, 1.2 * cm, 1.15 * cm, 1.45 * cm,
+                1.45 * cm, 1.45 * cm, 1.35 * cm, 1.35 * cm, 1.35 * cm,
+                1.35 * cm, 1.25 * cm, 1.25 * cm, 1.5 * cm,
+            ][:len(colunas_pdf)],
             repeatRows=1,
         )
         tabela.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#F4B183")),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#F4B183")),
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#FBE4D5")),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 6.2),
-            ("LEADING", (0, 0), (-1, -1), 7.0),
+            ("FONTSIZE", (0, 0), (-1, -1), 4.6),
+            ("LEADING", (0, 0), (-1, -1), 5.2),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 1),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+            ("LEFTPADDING", (0, 0), (-1, -1), 1),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 1),
         ]))
         elementos.append(tabela)
 
@@ -5026,6 +5036,8 @@ else:
 
     qtd_recibo = int(len(df_recibo))
     kg_recibo = float(df_recibo["KG Excedente"].sum())
+    total_entregas_valor_recibo = float(df_recibo["Valor CEP"].sum()) if "Valor CEP" in df_recibo.columns else 0.0
+    total_kg_excedente_valor_recibo = float(df_recibo["Valor Excedente KG"].sum()) if "Valor Excedente KG" in df_recibo.columns else 0.0
 
     st.info(
         f"Recibo selecionado: **{motorista_recibo}** | "
@@ -5130,6 +5142,8 @@ else:
                     total_recibo,
                     finalizado_por_pdf,
                     finalizado_em_pdf,
+                    total_entregas_valor_recibo,
+                    total_kg_excedente_valor_recibo,
                 ),),
                 key=f"download_relatorio_{nome_motorista_arquivo}_{data_inicio_recibo}_{data_fim_recibo}_{normalizar_nome_coluna(quinzena_recibo)}",
             )
@@ -5160,6 +5174,8 @@ else:
                     total_recibo,
                     finalizado_por_pdf,
                     finalizado_em_pdf,
+                    total_entregas_valor_recibo,
+                    total_kg_excedente_valor_recibo,
                 ),),
                 key=f"download_recibo_{nome_motorista_arquivo}_{data_inicio_recibo}_{data_fim_recibo}_{normalizar_nome_coluna(quinzena_recibo)}",
             )
@@ -5237,9 +5253,12 @@ if usuario_pode_extrair_consolidado():
             total_recibo if 'total_recibo' in globals() else 0,
             finalizado_por_excel,
             finalizado_em_excel,
+            total_entregas_valor_recibo if 'total_entregas_valor_recibo' in globals() else 0,
+            total_kg_excedente_valor_recibo if 'total_kg_excedente_valor_recibo' in globals() else 0,
         ),),
         key="download_fechamento_consolidado_excel",
     )
 else:
     st.warning("Faça login como admin para baixar o fechamento consolidado em Excel.")
+
 
