@@ -596,12 +596,12 @@ def historico_fechamentos_df() -> pd.DataFrame:
     historico = carregar_historico_fechamentos()
     colunas = [
         "Data/hora", "Usuário", "Perfil", "Tipo de documento", "Motorista", "CNPJ", "Quinzena",
-        "Período inicial", "Período final", "Quantidade de entregas", "Kg excedente", "Total Entregas",
+        "Período inicial", "Período final", "Qtd. de entregas", "Kg excedente", "Total Entregas",
         "Total Kg Excedente", "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados",
         "Bônus Feriado", "Vale", "Desconto", "Total do Recibo",
     ]
     colunas_numericas = [
-        "Quantidade de entregas", "Kg excedente", "Total Entregas", "Total Kg Excedente",
+        "Qtd. de entregas", "Kg excedente", "Total Entregas", "Kg Excedente",
         "Subtotal", "Acareação", "Bônus Extra", "Bônus Sábados", "Bônus Feriado",
         "Vale", "Desconto", "Total do Recibo",
     ]
