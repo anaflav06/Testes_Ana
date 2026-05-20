@@ -34,6 +34,22 @@ st.set_page_config(
     layout="wide"
 )
 
+# Oculta elementos padrão do Streamlit/GitHub para deixar a tela mais limpa no cliente.
+st.markdown("""
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+[data-testid="stToolbar"] {display: none;}
+[data-testid="stDecoration"] {display: none;}
+button[kind="header"] {display: none;}
+
+.block-container {
+    padding-top: 1rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 def agora_brasil():
     return datetime.now(ZoneInfo("America/Sao_Paulo"))
