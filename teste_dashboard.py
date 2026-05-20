@@ -26,7 +26,7 @@ except Exception:
 
 
 # =========================================================
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIGURAÇÃO DA PÁGINA (CoM BLOQUEADOR DE CODIGO)
 # =========================================================
 st.set_page_config(
     page_title="Fechamento de Prestadores de Serviços",
